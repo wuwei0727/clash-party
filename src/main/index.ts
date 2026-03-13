@@ -1,9 +1,13 @@
 import { electronApp, optimizer } from '@electron-toolkit/utils'
+console.log('[Main] Imports 1 done')
 import { app, dialog } from 'electron'
+console.log('[Main] Imports 2 done')
 import i18next from 'i18next'
 import { initI18n } from '../shared/i18n'
 import { registerIpcMainHandlers } from './utils/ipc'
+console.log('[Main] Imports 3 done')
 import { getAppConfig, patchAppConfig } from './config'
+console.log('[Main] Imports 4 done')
 import {
   startCore,
   checkAdminRestartForTun,
@@ -13,6 +17,7 @@ import {
   checkAdminPrivileges,
   initCoreWatcher
 } from './core/manager'
+console.log('[Main] Imports 5 done')
 import { createTray } from './resolve/tray'
 import { init, initBasic, safeShowErrorBox } from './utils/init'
 import { initShortcut } from './resolve/shortcut'
@@ -38,23 +43,32 @@ import {
 
 const mainLogger = createLogger('Main')
 
+console.log('[Main] Starting application...')
+
 export { mainWindow, showMainWindow, triggerMainWindow, closeMainWindow }
 
 const gotTheLock = app.requestSingleInstanceLock()
+console.log('[Main] Single instance lock acquired:', gotTheLock)
+
 if (!gotTheLock) {
+  console.log('[Main] Quitting because another instance is running.')
   app.quit()
 }
 
 async function initApp(): Promise<void> {
+  console.log('[Main] initApp started')
   await fixUserDataPermissions()
+  console.log('[Main] initApp finished')
 }
 
 initApp().catch((e) => {
+  console.error('[Main] initApp failed:', e)
   safeShowErrorBox('common.error.initFailed', `${e}`)
   app.quit()
 })
 
 setupPlatformSpecifics()
+console.log('[Main] Platform specifics setup')
 
 async function checkHighPrivilegeCoreEarly(): Promise<void> {
   if (process.platform !== 'win32') return

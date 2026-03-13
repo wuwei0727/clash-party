@@ -69,6 +69,7 @@ const validInvokeChannels = [
   'getFilePath',
   'readTextFile',
   'openFile',
+  'openFileLocation',
   // Core
   'restartCore',
   'startMonitor',

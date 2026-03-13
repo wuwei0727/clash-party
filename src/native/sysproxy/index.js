@@ -112,7 +112,22 @@ function loadBinding() {
   throw new Error(`Native binding not found: ${bindingName}`)
 }
 
-const binding = loadBinding()
+let binding
+try {
+  binding = loadBinding()
+} catch (e) {
+  console.error('[Sysproxy-rs] Critical Error: Failed to load native binding', e)
+  binding = {
+    triggerManualProxy: () => console.warn('sysproxy not loaded'),
+    triggerAutoProxy: () => console.warn('sysproxy not loaded'),
+    getSystemProxy: () => Promise.resolve({}),
+    getAutoProxy: () => Promise.resolve({}),
+    setSystemProxy: () => Promise.resolve(false),
+    setAutoProxy: () => Promise.resolve(false)
+  }
+}
+
+console.log('[Sysproxy-rs] Initialization complete. Mocked:', binding.triggerManualProxy.toString().includes('sysproxy not loaded'))
 
 module.exports.triggerManualProxy = binding.triggerManualProxy
 module.exports.triggerAutoProxy = binding.triggerAutoProxy

@@ -26,8 +26,8 @@ protocols:
 win:
   target:
     - nsis
-    - 7z
   artifactName: clash-party-windows-${version}-${arch}-portable.${ext}
+  forceCodeSigning: false
 nsis:
   artifactName: clash-party-windows-${version}-${arch}-setup.${ext}
   uninstallDisplayName: ${productName}

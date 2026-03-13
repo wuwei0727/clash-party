@@ -14,7 +14,7 @@ import dayjs from '@renderer/utils/dayjs'
 import React, { Key, useMemo, useState } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { openFile, restartCore } from '@renderer/utils/ipc'
+import { openFile, openFileLocation, restartCore } from '@renderer/utils/ipc'
 import { useTranslation } from 'react-i18next'
 import ExecLogModal from './exec-log-modal'
 import EditInfoModal from './edit-info-modal'
@@ -80,6 +80,13 @@ const OverrideItem: React.FC<Props> = (props) => {
         className: ''
       } as MenuItem,
       {
+        key: 'open-file-location',
+        label: t('override.menuItems.openFileLocation'),
+        showDivider: info.ext === 'yaml',
+        color: 'default',
+        className: ''
+      } as MenuItem,
+      {
         key: 'exec-log',
         label: t('override.menuItems.execLog'),
         showDivider: true,
@@ -95,7 +102,7 @@ const OverrideItem: React.FC<Props> = (props) => {
       } as MenuItem
     ]
     if (info.ext === 'yaml') {
-      list.splice(3, 1)
+      list.splice(4, 1)
     }
     return list
   }, [info, t])
@@ -111,6 +118,10 @@ const OverrideItem: React.FC<Props> = (props) => {
       }
       case 'open-file': {
         openFile('override', info.id, info.ext)
+        break
+      }
+      case 'open-file-location': {
+        openFileLocation('override', info.id, info.ext)
         break
       }
       case 'exec-log': {

@@ -81,6 +81,11 @@ interface IpcApi {
   getFilePath: (ext: string[]) => Promise<string[] | undefined>
   readTextFile: (filePath: string) => Promise<string>
   openFile: (type: 'profile' | 'override', id: string, ext?: 'yaml' | 'js') => Promise<void>
+  openFileLocation: (
+    type: 'profile' | 'override',
+    id: string,
+    ext?: 'yaml' | 'js'
+  ) => Promise<void>
   // Core
   restartCore: () => Promise<void>
   startMonitor: () => Promise<void>
@@ -236,6 +241,7 @@ export const {
   getFilePath,
   readTextFile,
   openFile,
+  openFileLocation,
   // Core
   restartCore,
   startMonitor,

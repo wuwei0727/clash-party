@@ -1,0 +1,5 @@
+.fastRequest/config/fastRequestCurrentProjectConfig.json
+.github/workflows/build-mac.yml
+SAFE_UPSTREAM_UPDATE.md
+local-changes-before-update.patch
+untracked-files-before-update.txt

@@ -83,6 +83,7 @@ import { checkUpdate, downloadAndInstallUpdate } from '../resolve/autoUpdater'
 import {
   getFilePath,
   openFile,
+  openFileLocation,
   openUWPTool,
   readImageFileDataURL,
   readTextFile,
@@ -430,6 +431,7 @@ const syncHandlers: Record<string, SyncFn> = {
   resetAppConfig,
   getFilePath,
   openFile,
+  openFileLocation,
   getInterfaces,
   setNativeTheme,
   getVersion: () => app.getVersion(),

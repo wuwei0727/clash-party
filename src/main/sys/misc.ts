@@ -63,6 +63,19 @@ export function openFile(type: 'profile' | 'override', id: string, ext?: 'yaml' 
   }
 }
 
+export function openFileLocation(
+  type: 'profile' | 'override',
+  id: string,
+  ext?: 'yaml' | 'js'
+): void {
+  if (type === 'profile') {
+    shell.showItemInFolder(profilePath(id))
+  }
+  if (type === 'override') {
+    shell.showItemInFolder(overridePath(id, ext || 'js'))
+  }
+}
+
 export async function openUWPTool(): Promise<void> {
   const execPromise = promisify(exec)
   const execFilePromise = promisify(execFile)

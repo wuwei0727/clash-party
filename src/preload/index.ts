@@ -69,6 +69,7 @@ const validInvokeChannels = [
   'readTextFile',
   'readImageFileDataURL',
   'openFile',
+  'openFileLocation',
   // Core
   'restartCore',
   'mihomoHotReloadConfig',

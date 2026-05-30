@@ -9,6 +9,7 @@ files:
   - '!images/*'
   - '!scripts/*'
   - '!extra/*'
+  - '!dist*/**'
   - '!tailwind.config.js'
   - '!postcss.config.js'
   - '!electron.vite.config.{js,ts,mjs,cjs}'

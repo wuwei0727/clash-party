@@ -1,7 +1,5 @@
-import { execFileSync } from 'child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
-import { tmpdir } from 'os'
-import { extname, join } from 'path'
+import { existsSync } from 'fs'
+import { extname } from 'path'
 import { app, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 import { t } from 'i18next'
 import {
@@ -12,7 +10,6 @@ import {
   patchAppConfig,
   patchControledMihomoConfig
 } from '../config'
-import { DEFAULT_MIHOMO_PORTS } from '../../shared/appConfig'
 import icoIcon from '../../../resources/icon.ico?asset'
 import icoIconBlue from '../../../resources/icon_blue.ico?asset'
 import icoIconRed from '../../../resources/icon_red.ico?asset'
@@ -29,7 +26,8 @@ import {
   mihomoGroups,
   patchMihomoConfig,
   getTrayIconStatus,
-  calculateTrayIconStatus
+  calculateTrayIconStatus,
+  TunStatus
 } from '../core/mihomoApi'
 import { mainWindow, showMainWindow, triggerMainWindow } from '../window'
 import { dataDir, logDir, mihomoCoreDir, mihomoWorkDir } from '../utils/dirs'
@@ -38,7 +36,8 @@ import {
   quitWithoutCore,
   checkMihomoCorePermissions,
   requestTunPermissions,
-  restartAsAdmin
+  restartAsAdmin,
+  setTunMode
 } from '../core/manager'
 import { trayLogger } from '../utils/logger'
 import { writeClipboardText } from '../utils/clipboard'
@@ -50,9 +49,55 @@ let trayMenu: Menu | null = null
 let macTrafficIconEnabled = false
 type TrayIconStatus = 'white' | 'blue' | 'green' | 'red'
 type TrayImage = Electron.NativeImage | string
-type CustomTrayIconKey = keyof ICustomTrayIcons
 const customTrayIconSize = 16
 const customTrayIconScaleFactors = [1, 1.25, 1.5, 2, 2.5, 3]
+
+function getActiveTray(): Tray | null {
+  if (!tray) return null
+
+  if (tray.isDestroyed()) {
+    tray = null
+    return null
+  }
+
+  return tray
+}
+
+function runTrayAction(actionName: string, action: () => void | Promise<void>): void {
+  void (async () => {
+    try {
+      await action()
+    } catch (error) {
+      await trayLogger.error(`Failed to ${actionName}`, error)
+    }
+  })()
+}
+
+function sendToWindow(
+  window: Electron.BrowserWindow | null | undefined,
+  channel: string,
+  ...args: unknown[]
+): void {
+  try {
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return
+    window.webContents.send(channel, ...args)
+  } catch (error) {
+    void trayLogger.warn(`Failed to send ${channel} from tray`, error)
+  }
+}
+
+async function refreshTrayUi(): Promise<void> {
+  await updateTrayMenu()
+  await updateTrayIcon()
+}
+
+async function refreshTrayUiWithState(
+  sysProxyEnabled: boolean,
+  tunEnabled: boolean
+): Promise<void> {
+  await updateTrayMenu()
+  await updateTrayIconWithState(sysProxyEnabled, tunEnabled)
+}
 
 export const buildContextMenu = async (): Promise<Menu> => {
   // 添加调试日志
@@ -66,7 +111,10 @@ export const buildContextMenu = async (): Promise<Menu> => {
     t('tray.showFloatingWindow')
   )
 
-  const { mode, tun } = await getControledMihomoConfig()
+  const [{ mode }, effectiveTunEnabled] = await Promise.all([
+    getControledMihomoConfig(),
+    TunStatus()
+  ])
   const {
     sysProxy,
     envType = process.platform === 'win32' ? ['powershell'] : ['bash'],
@@ -100,13 +148,11 @@ export const buildContextMenu = async (): Promise<Menu> => {
               id: `${group.name}-delay-test`,
               label: t('tray.delayTest'),
               type: 'normal' as const,
-              click: async (): Promise<void> => {
-                try {
+              click: (): void => {
+                runTrayAction(`test proxy group delay ${group.name}`, async () => {
                   await mihomoGroupDelay(group.name, group.testUrl)
-                  mainWindow?.webContents.send('groupsUpdated')
-                } catch (error) {
-                  await trayLogger.error(`Failed to test proxy group delay: ${group.name}`, error)
-                }
+                  sendToWindow(mainWindow, 'groupsUpdated')
+                })
               }
             },
             { type: 'separator' as const },
@@ -126,11 +172,14 @@ export const buildContextMenu = async (): Promise<Menu> => {
                 label: `${proxy.name}   ${displayDelay}`,
                 type: 'radio' as const,
                 checked: proxy.name === group.now,
-                click: async (): Promise<void> => {
-                  await mihomoChangeProxy(group.name, proxy.name)
-                  if (autoCloseConnection) {
-                    await mihomoCloseAllConnections()
-                  }
+                click: (): void => {
+                  runTrayAction(`change proxy ${group.name}/${proxy.name}`, async () => {
+                    await mihomoChangeProxy(group.name, proxy.name)
+                    if (autoCloseConnection) {
+                      await mihomoCloseAllConnections()
+                    }
+                    await refreshTrayUi()
+                  })
                 }
               }
             })
@@ -176,8 +225,8 @@ export const buildContextMenu = async (): Promise<Menu> => {
         ? t('tray.hideFloatingWindow')
         : t('tray.showFloatingWindow'),
       type: 'normal',
-      click: async (): Promise<void> => {
-        await triggerFloatingWindow()
+      click: (): void => {
+        runTrayAction('toggle floating window from tray', triggerFloatingWindow)
       }
     },
     {
@@ -186,13 +235,14 @@ export const buildContextMenu = async (): Promise<Menu> => {
       accelerator: ruleModeShortcut,
       type: 'radio',
       checked: mode === 'rule',
-      click: async (): Promise<void> => {
-        await patchControledMihomoConfig({ mode: 'rule' })
-        await patchMihomoConfig({ mode: 'rule' })
-        mainWindow?.webContents.send('controledMihomoConfigUpdated')
-        mainWindow?.webContents.send('groupsUpdated')
-        ipcMain.emit('updateTrayMenu')
-        await updateTrayIcon()
+      click: (): void => {
+        runTrayAction('switch to rule mode from tray', async () => {
+          await patchControledMihomoConfig({ mode: 'rule' })
+          await patchMihomoConfig({ mode: 'rule' })
+          sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
+          sendToWindow(mainWindow, 'groupsUpdated')
+          await refreshTrayUi()
+        })
       }
     },
     {
@@ -201,13 +251,14 @@ export const buildContextMenu = async (): Promise<Menu> => {
       accelerator: globalModeShortcut,
       type: 'radio',
       checked: mode === 'global',
-      click: async (): Promise<void> => {
-        await patchControledMihomoConfig({ mode: 'global' })
-        await patchMihomoConfig({ mode: 'global' })
-        mainWindow?.webContents.send('controledMihomoConfigUpdated')
-        mainWindow?.webContents.send('groupsUpdated')
-        ipcMain.emit('updateTrayMenu')
-        await updateTrayIcon()
+      click: (): void => {
+        runTrayAction('switch to global mode from tray', async () => {
+          await patchControledMihomoConfig({ mode: 'global' })
+          await patchMihomoConfig({ mode: 'global' })
+          sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
+          sendToWindow(mainWindow, 'groupsUpdated')
+          await refreshTrayUi()
+        })
       }
     },
     {
@@ -216,13 +267,14 @@ export const buildContextMenu = async (): Promise<Menu> => {
       accelerator: directModeShortcut,
       type: 'radio',
       checked: mode === 'direct',
-      click: async (): Promise<void> => {
-        await patchControledMihomoConfig({ mode: 'direct' })
-        await patchMihomoConfig({ mode: 'direct' })
-        mainWindow?.webContents.send('controledMihomoConfigUpdated')
-        mainWindow?.webContents.send('groupsUpdated')
-        ipcMain.emit('updateTrayMenu')
-        await updateTrayIcon()
+      click: (): void => {
+        runTrayAction('switch to direct mode from tray', async () => {
+          await patchControledMihomoConfig({ mode: 'direct' })
+          await patchMihomoConfig({ mode: 'direct' })
+          sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
+          sendToWindow(mainWindow, 'groupsUpdated')
+          await refreshTrayUi()
+        })
       }
     },
     { type: 'separator' },
@@ -231,75 +283,92 @@ export const buildContextMenu = async (): Promise<Menu> => {
       label: t('tray.systemProxy'),
       accelerator: triggerSysProxyShortcut,
       checked: sysProxy.enable,
-      click: async (item): Promise<void> => {
+      click: (item): void => {
         const enable = item.checked
-        try {
-          await triggerSysProxy(enable)
-          await patchAppConfig({ sysProxy: { enable } })
-          mainWindow?.webContents.send('appConfigUpdated')
-          floatingWindow?.webContents.send('appConfigUpdated')
-        } catch {
-          // ignore
-        } finally {
-          ipcMain.emit('updateTrayMenu')
-          await updateTrayIcon()
-        }
+        const previousEnable = !enable
+        const tunEnabled = effectiveTunEnabled
+        runTrayAction('toggle system proxy from tray', async () => {
+          try {
+            await updateTrayIconWithState(enable, tunEnabled)
+            await patchAppConfig({ sysProxy: { enable } })
+            await triggerSysProxy(enable)
+            sendToWindow(mainWindow, 'appConfigUpdated')
+            sendToWindow(floatingWindow, 'appConfigUpdated')
+            await refreshTrayUiWithState(enable, tunEnabled)
+          } catch (error) {
+            item.checked = previousEnable
+            try {
+              await patchAppConfig({ sysProxy: { enable: previousEnable } })
+            } catch (rollbackError) {
+              await trayLogger.warn(
+                'Failed to rollback system proxy config from tray',
+                rollbackError
+              )
+            }
+            await updateTrayIconWithState(previousEnable, tunEnabled)
+            await trayLogger.error('Failed to toggle system proxy from tray', error)
+          }
+        })
       }
     },
     {
       type: 'checkbox',
       label: t('tray.tun'),
       accelerator: triggerTunShortcut,
-      checked: tun?.enable ?? false,
-      click: async (item): Promise<void> => {
+      checked: effectiveTunEnabled,
+      click: (item): void => {
         const enable = item.checked
-        try {
-          if (enable) {
-            // 检查权限
-            try {
-              const hasPermissions = await checkMihomoCorePermissions()
+        const previousEnable = !enable
+        const sysProxyEnabled = sysProxy.enable
+        runTrayAction('toggle TUN from tray', async () => {
+          try {
+            if (enable) {
+              // 检查权限
+              try {
+                const hasPermissions = await checkMihomoCorePermissions()
 
-              if (!hasPermissions) {
-                if (process.platform === 'win32') {
-                  try {
-                    await restartAsAdmin()
-                    return
-                  } catch (error) {
-                    await trayLogger.error('Failed to restart as admin from tray', error)
-                    item.checked = false
-                    ipcMain.emit('updateTrayMenu')
-                    return
-                  }
-                } else {
-                  try {
-                    await requestTunPermissions()
-                  } catch (error) {
-                    await trayLogger.error('Failed to grant TUN permissions from tray', error)
-                    item.checked = false
-                    ipcMain.emit('updateTrayMenu')
-                    return
+                if (!hasPermissions) {
+                  if (process.platform === 'win32') {
+                    try {
+                      await restartAsAdmin()
+                      return
+                    } catch (error) {
+                      await trayLogger.error('Failed to restart as admin from tray', error)
+                      item.checked = previousEnable
+                      await refreshTrayUiWithState(sysProxyEnabled, previousEnable)
+                      return
+                    }
+                  } else {
+                    try {
+                      await requestTunPermissions()
+                    } catch (error) {
+                      await trayLogger.error('Failed to grant TUN permissions from tray', error)
+                      item.checked = previousEnable
+                      await refreshTrayUiWithState(sysProxyEnabled, previousEnable)
+                      return
+                    }
                   }
                 }
+              } catch (error) {
+                await trayLogger.warn('Permission check failed in tray', error)
+                item.checked = previousEnable
+                await refreshTrayUiWithState(sysProxyEnabled, previousEnable)
+                return
               }
-            } catch (error) {
-              await trayLogger.warn('Permission check failed in tray', error)
-              item.checked = false
-              ipcMain.emit('updateTrayMenu')
-              return
             }
 
-            await patchControledMihomoConfig({ tun: { enable }, dns: { enable: true } })
-          } else {
-            await patchControledMihomoConfig({ tun: { enable } })
+            await setTunMode(enable)
+            sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
+            sendToWindow(floatingWindow, 'controledMihomoConfigUpdated')
+            await refreshTrayUiWithState(sysProxyEnabled, enable)
+          } catch (error) {
+            item.checked = previousEnable
+            sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
+            sendToWindow(floatingWindow, 'controledMihomoConfigUpdated')
+            await refreshTrayUi()
+            await trayLogger.error('Failed to toggle TUN from tray', error)
           }
-          mainWindow?.webContents.send('controledMihomoConfigUpdated')
-          floatingWindow?.webContents.send('controledMihomoConfigUpdated')
-        } catch {
-          // ignore
-        } finally {
-          ipcMain.emit('updateTrayMenu')
-          await updateTrayIcon()
-        }
+        })
       }
     },
     ...groupsMenu,
@@ -312,12 +381,13 @@ export const buildContextMenu = async (): Promise<Menu> => {
           type: 'radio',
           label: item.name,
           checked: item.id === current,
-          click: async (): Promise<void> => {
-            if (item.id === current) return
-            await changeCurrentProfile(item.id)
-            mainWindow?.webContents.send('profileConfigUpdated')
-            ipcMain.emit('updateTrayMenu')
-            await updateTrayIcon()
+          click: (): void => {
+            runTrayAction(`change profile to ${item.name}`, async () => {
+              if (item.id === current) return
+              await changeCurrentProfile(item.id)
+              sendToWindow(mainWindow, 'profileConfigUpdated')
+              await refreshTrayUi()
+            })
           }
         }
       })
@@ -330,22 +400,42 @@ export const buildContextMenu = async (): Promise<Menu> => {
         {
           type: 'normal',
           label: t('tray.openDirectories.appDir'),
-          click: (): Promise<string> => shell.openPath(dataDir())
+          click: (): void => {
+            runTrayAction('open app directory from tray', async () => {
+              const errorMessage = await shell.openPath(dataDir())
+              if (errorMessage) throw new Error(errorMessage)
+            })
+          }
         },
         {
           type: 'normal',
           label: t('tray.openDirectories.workDir'),
-          click: (): Promise<string> => shell.openPath(mihomoWorkDir())
+          click: (): void => {
+            runTrayAction('open work directory from tray', async () => {
+              const errorMessage = await shell.openPath(mihomoWorkDir())
+              if (errorMessage) throw new Error(errorMessage)
+            })
+          }
         },
         {
           type: 'normal',
           label: t('tray.openDirectories.coreDir'),
-          click: (): Promise<string> => shell.openPath(mihomoCoreDir())
+          click: (): void => {
+            runTrayAction('open core directory from tray', async () => {
+              const errorMessage = await shell.openPath(mihomoCoreDir())
+              if (errorMessage) throw new Error(errorMessage)
+            })
+          }
         },
         {
           type: 'normal',
           label: t('tray.openDirectories.logDir'),
-          click: (): Promise<string> => shell.openPath(logDir())
+          click: (): void => {
+            runTrayAction('open log directory from tray', async () => {
+              const errorMessage = await shell.openPath(logDir())
+              if (errorMessage) throw new Error(errorMessage)
+            })
+          }
         }
       ]
     },
@@ -358,8 +448,8 @@ export const buildContextMenu = async (): Promise<Menu> => {
               id: type,
               label: type,
               type: 'normal',
-              click: async (): Promise<void> => {
-                await copyEnv(type)
+              click: (): void => {
+                runTrayAction(`copy ${type} proxy env from tray`, () => copyEnv(type))
               }
             }
           })
@@ -368,8 +458,8 @@ export const buildContextMenu = async (): Promise<Menu> => {
           id: 'copyenv',
           label: t('tray.copyEnv'),
           type: 'normal',
-          click: async (): Promise<void> => {
-            await copyEnv(envType[0])
+          click: (): void => {
+            runTrayAction(`copy ${envType[0]} proxy env from tray`, () => copyEnv(envType[0]))
           }
         },
     { type: 'separator' },
@@ -378,7 +468,9 @@ export const buildContextMenu = async (): Promise<Menu> => {
       label: t('actions.lightMode.button'),
       type: 'normal',
       accelerator: quitWithoutCoreShortcut,
-      click: quitWithoutCore
+      click: (): void => {
+        runTrayAction('enter lightweight mode from tray', quitWithoutCore)
+      }
     },
     {
       id: 'restart',
@@ -386,8 +478,10 @@ export const buildContextMenu = async (): Promise<Menu> => {
       type: 'normal',
       accelerator: restartAppShortcut,
       click: (): void => {
-        app.relaunch()
-        app.quit()
+        runTrayAction('restart app from tray', () => {
+          app.relaunch()
+          app.quit()
+        })
       }
     },
     {
@@ -395,7 +489,9 @@ export const buildContextMenu = async (): Promise<Menu> => {
       label: t('actions.quit.button'),
       type: 'normal',
       accelerator: 'CommandOrControl+Q',
-      click: (): void => app.quit()
+      click: (): void => {
+        runTrayAction('quit app from tray', () => app.quit())
+      }
     }
   ] as Electron.MenuItemConstructorOptions[]
   return Menu.buildFromTemplate(contextMenu)
@@ -429,9 +525,8 @@ export async function createTray(): Promise<void> {
     ipcMain.removeAllListeners('trayIconUpdate')
     ipcMain.on('trayIconUpdate', async (_, png: string, enabled: boolean) => {
       macTrafficIconEnabled = enabled
-      const appConfig = await getAppConfig()
-      const status = await getTrayIconStatus()
-      const customIcon = createCustomTrayImageForStatus(appConfig, status)
+      const { customTrayIcon = '' } = await getAppConfig()
+      const customIcon = createCustomTrayImage(customTrayIcon)
       if (customIcon) {
         tray?.setImage(customIcon)
         await updateTrayToolTip(undefined, undefined, true)
@@ -445,7 +540,7 @@ export async function createTray(): Promise<void> {
     // macOS 默认行为：左键显示窗口，右键显示菜单
     tray?.addListener('click', async () => {
       if (swapTrayClick) {
-        await updateTrayMenu()
+        await showTrayMenu()
       } else {
         triggerMainWindow()
       }
@@ -454,14 +549,14 @@ export async function createTray(): Promise<void> {
       if (swapTrayClick) {
         triggerMainWindow()
       } else {
-        await updateTrayMenu()
+        await showTrayMenu()
       }
     })
   }
   if (process.platform === 'win32') {
     tray?.addListener('click', async () => {
       if (swapTrayClick) {
-        await updateTrayMenu()
+        await showTrayMenu()
       } else {
         triggerMainWindow()
       }
@@ -470,38 +565,58 @@ export async function createTray(): Promise<void> {
       if (swapTrayClick) {
         triggerMainWindow()
       } else {
-        await updateTrayMenu()
+        await showTrayMenu()
       }
     })
   }
   if (process.platform === 'linux') {
     tray?.addListener('click', async () => {
       if (swapTrayClick) {
-        await updateTrayMenu()
+        await showTrayMenu()
       } else {
         triggerMainWindow()
       }
     })
-    // 移除旧监听器防止累积
-    ipcMain.removeAllListeners('updateTrayMenu')
-    ipcMain.on('updateTrayMenu', async () => {
-      await updateTrayMenu()
-    })
   }
+
+  // 移除旧监听器防止累积。所有平台都需要响应配置变更后的托盘刷新。
+  ipcMain.removeAllListeners('updateTrayMenu')
+  ipcMain.on('updateTrayMenu', async () => {
+    await updateTrayMenu()
+    await updateTrayIcon()
+  })
 }
 
 async function updateTrayMenu(): Promise<void> {
-  trayMenu = await buildContextMenu()
-  tray?.popUpContextMenu(trayMenu) // 弹出菜单
-  if (process.platform === 'linux') {
-    tray?.setContextMenu(trayMenu)
+  try {
+    const activeTray = getActiveTray()
+    if (!activeTray) return
+
+    trayMenu = await buildContextMenu()
+    const currentTray = getActiveTray()
+    if (!currentTray) return
+
+    if (process.platform === 'linux') {
+      currentTray.setContextMenu(trayMenu)
+    }
+  } catch (error) {
+    await trayLogger.error('Failed to update tray menu', error)
   }
+}
+
+async function showTrayMenu(): Promise<void> {
+  await updateTrayMenu()
+
+  const currentTray = getActiveTray()
+  if (!currentTray || !trayMenu) return
+
+  currentTray.popUpContextMenu(trayMenu)
 }
 
 export async function copyEnv(
   type: 'bash' | 'cmd' | 'powershell' | 'fish' | 'nushell'
 ): Promise<void> {
-  const { 'mixed-port': mixedPort = DEFAULT_MIHOMO_PORTS.mixed } = await getControledMihomoConfig()
+  const { 'mixed-port': mixedPort = 7890 } = await getControledMihomoConfig()
   const { sysProxy } = await getAppConfig()
   const { host } = sysProxy
   const proxyUrl = `http://${host || '127.0.0.1'}:${mixedPort}`
@@ -534,14 +649,15 @@ export async function copyEnv(
 }
 
 export async function showTrayIcon(): Promise<void> {
-  if (!tray) {
+  if (!getActiveTray()) {
     await createTray()
   }
 }
 
 export async function closeTrayIcon(): Promise<void> {
-  if (tray) {
-    tray.destroy()
+  const activeTray = getActiveTray()
+  if (activeTray) {
+    activeTray.destroy()
   }
   tray = null
   trayMenu = null
@@ -599,41 +715,9 @@ function createMultiScaleTrayImage(icon: Electron.NativeImage): Electron.NativeI
     })
   }
 
-  if (!trayImage.isEmpty()) {
-    if (process.platform === 'darwin') {
-      trayImage.setTemplateImage(true)
-    }
-    return trayImage
-  }
+  if (!trayImage.isEmpty()) return trayImage
 
-  const fallback = resizeTrayImageForScale(icon, 1)
-  if (process.platform === 'darwin') {
-    fallback.setTemplateImage(true)
-  }
-  return fallback
-}
-
-function createMacIconImage(iconPath: string): Electron.NativeImage | null {
-  if (process.platform !== 'darwin') return null
-  if (!['.ico', '.icns'].includes(extname(iconPath).toLowerCase())) return null
-
-  let tempDir = ''
-  try {
-    tempDir = mkdtempSync(join(tmpdir(), 'clash-party-tray-icon-'))
-    const pngPath = join(tempDir, 'icon.png')
-    execFileSync('sips', ['-s', 'format', 'png', iconPath, '--out', pngPath], {
-      stdio: 'ignore',
-      timeout: 5000
-    })
-    const icon = nativeImage.createFromBuffer(readFileSync(pngPath))
-    return icon.isEmpty() ? null : icon
-  } catch {
-    return null
-  } finally {
-    if (tempDir) {
-      rmSync(tempDir, { recursive: true, force: true })
-    }
-  }
+  return resizeTrayImageForScale(icon, 1)
 }
 
 function createCustomTrayImage(customTrayIcon: string): TrayImage | null {
@@ -648,13 +732,10 @@ function createCustomTrayImage(customTrayIcon: string): TrayImage | null {
 
   if (!existsSync(customTrayIcon)) return null
 
-  const iconExt = extname(customTrayIcon).toLowerCase()
-  let icon = nativeImage.createFromPath(customTrayIcon)
-  if (icon.isEmpty()) {
-    icon = createMacIconImage(customTrayIcon) || nativeImage.createEmpty()
-  }
+  const icon = nativeImage.createFromPath(customTrayIcon)
   if (icon.isEmpty()) return null
 
+  const iconExt = extname(customTrayIcon).toLowerCase()
   if (process.platform === 'win32' && iconExt === '.ico') {
     return customTrayIcon
   }
@@ -665,135 +746,134 @@ function createCustomTrayImage(customTrayIcon: string): TrayImage | null {
   return createMultiScaleTrayImage(icon)
 }
 
-function hasCustomTrayIcons(customTrayIcons?: ICustomTrayIcons): boolean {
-  return Boolean(customTrayIcons && Object.values(customTrayIcons).some(Boolean))
-}
-
-function getCustomTrayIconKey(status: TrayIconStatus): CustomTrayIconKey {
-  switch (status) {
-    case 'blue':
-      return 'sysProxy'
-    case 'green':
-      return 'tun'
-    case 'red':
-      return 'tun'
-    case 'white':
-    default:
-      return 'off'
-  }
-}
-
-function getCustomTrayIconForStatus(
-  appConfig: IAppConfig,
-  status: TrayIconStatus
-): string | undefined {
-  const { customTrayIcon = '', customTrayIcons = {} } = appConfig
-  const iconKey = getCustomTrayIconKey(status)
-
-  if (customTrayIcons[iconKey]) return customTrayIcons[iconKey]
-
-  if (status === 'red') {
-    return customTrayIcons.sysProxy || customTrayIcon
-  }
-
-  return customTrayIcon
-}
-
-function createCustomTrayImageForStatus(
-  appConfig: IAppConfig,
-  status: TrayIconStatus
-): TrayImage | null {
-  return createCustomTrayImage(getCustomTrayIconForStatus(appConfig, status) || '')
-}
-
 async function updateTrayToolTip(
   sysProxyEnabled?: boolean,
   tunEnabled?: boolean,
   customIconEnabled?: boolean
 ): Promise<void> {
-  if (!tray) return
+  try {
+    if (!getActiveTray()) return
 
-  const [{ mode, tun }, appConfig] = await Promise.all([getControledMihomoConfig(), getAppConfig()])
-  const sysProxy = sysProxyEnabled ?? appConfig.sysProxy.enable
-  const tunStatus = tunEnabled ?? tun?.enable === true
-  const isCustomIcon =
-    customIconEnabled ??
-    Boolean(appConfig.customTrayIcon || hasCustomTrayIcons(appConfig.customTrayIcons))
+    const [{ mode, tun }, appConfig] = await Promise.all([
+      getControledMihomoConfig(),
+      getAppConfig()
+    ])
+    const sysProxy = sysProxyEnabled ?? appConfig.sysProxy.enable
+    const tunStatus = tunEnabled ?? tun?.enable === true
+    const isCustomIcon = customIconEnabled ?? Boolean(appConfig.customTrayIcon)
 
-  const modeLabel =
-    mode === 'global'
-      ? t('tray.globalMode')
-      : mode === 'direct'
-        ? t('tray.directMode')
-        : t('tray.ruleMode')
-  const status = [
-    `${t('tray.tooltip.mode')}: ${modeLabel}`,
-    `${t('tray.systemProxy')}: ${sysProxy ? t('tray.tooltip.enabled') : t('tray.tooltip.disabled')}`,
-    `${t('tray.tun')}: ${tunStatus ? t('tray.tooltip.enabled') : t('tray.tooltip.disabled')}`
-  ]
+    const modeLabel =
+      mode === 'global'
+        ? t('tray.globalMode')
+        : mode === 'direct'
+          ? t('tray.directMode')
+          : t('tray.ruleMode')
+    const status = [
+      `${t('tray.tooltip.mode')}: ${modeLabel}`,
+      `${t('tray.systemProxy')}: ${sysProxy ? t('tray.tooltip.enabled') : t('tray.tooltip.disabled')}`,
+      `${t('tray.tun')}: ${tunStatus ? t('tray.tooltip.enabled') : t('tray.tooltip.disabled')}`
+    ]
 
-  if (isCustomIcon) {
-    status.push(t('tray.tooltip.customIcon'))
+    if (isCustomIcon) {
+      status.push(t('tray.tooltip.customIcon'))
+    }
+
+    getActiveTray()?.setToolTip(['Clash Party', ...status].join('\n'))
+  } catch (error) {
+    await trayLogger.warn('Failed to update tray tooltip', error)
   }
-
-  tray.setToolTip(['Clash Party', ...status].join('\n'))
 }
 
 function setTrayImage(iconPath: string): void {
-  if (!tray) return
+  const activeTray = getActiveTray()
+  if (!activeTray) return
 
   if (process.platform === 'darwin') {
     const icon = nativeImage.createFromPath(iconPath).resize({ height: 16 })
-    tray.setImage(icon)
+    activeTray.setImage(icon)
   } else if (process.platform === 'win32') {
-    tray.setImage(iconPath)
+    activeTray.setImage(iconPath)
   } else if (process.platform === 'linux') {
-    tray.setImage(iconPath)
+    activeTray.setImage(iconPath)
   }
 }
 
 export function updateTrayIconImmediate(sysProxyEnabled: boolean, tunEnabled: boolean): void {
-  if (!tray) return
+  if (!getActiveTray()) return
 
   const status = calculateTrayIconStatus(sysProxyEnabled, tunEnabled)
   const iconPaths = getIconPaths()
 
-  getAppConfig().then(async (appConfig) => {
-    if (!tray) return
-    try {
-      const { disableTrayIconColor = false } = appConfig
-      const customIcon = createCustomTrayImageForStatus(appConfig, status)
-      if (customIcon) {
-        tray.setImage(customIcon)
-        await updateTrayToolTip(sysProxyEnabled, tunEnabled, true)
-        return
-      }
-      // macOS 流量显示开启时，由 trayIconUpdate 负责图标更新
-      if (process.platform === 'darwin' && macTrafficIconEnabled) {
+  getAppConfig()
+    .then(async ({ disableTrayIconColor = false, customTrayIcon = '' }) => {
+      if (!getActiveTray()) return
+      try {
+        const customIcon = createCustomTrayImage(customTrayIcon)
+        if (customIcon) {
+          getActiveTray()?.setImage(customIcon)
+          await updateTrayToolTip(sysProxyEnabled, tunEnabled, true)
+          return
+        }
+        // macOS 流量显示开启时，由 trayIconUpdate 负责图标更新
+        if (process.platform === 'darwin' && macTrafficIconEnabled) {
+          await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
+          return
+        }
+        const iconPath = disableTrayIconColor ? iconPaths.white : iconPaths[status]
+        setTrayImage(iconPath)
         await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
-        return
+      } catch (error) {
+        await trayLogger.warn('Failed to update tray icon immediately', error)
       }
-      const iconPath = disableTrayIconColor ? iconPaths.white : iconPaths[status]
-      setTrayImage(iconPath)
-      await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
-    } catch {
-      // Failed to update tray icon
+    })
+    .catch((error) => {
+      void trayLogger.warn('Failed to read config for tray icon update', error)
+    })
+}
+
+async function updateTrayIconWithState(
+  sysProxyEnabled: boolean,
+  tunEnabled: boolean
+): Promise<void> {
+  if (!getActiveTray()) return
+
+  try {
+    const { disableTrayIconColor = false, customTrayIcon = '' } = await getAppConfig()
+    const status = calculateTrayIconStatus(sysProxyEnabled, tunEnabled)
+    const iconPaths = getIconPaths()
+
+    const customIcon = createCustomTrayImage(customTrayIcon)
+    if (customIcon) {
+      getActiveTray()?.setImage(customIcon)
+      await updateTrayToolTip(sysProxyEnabled, tunEnabled, true)
+      return
     }
-  })
+
+    // macOS 流量显示开启时，由 trayIconUpdate 负责图标更新
+    if (process.platform === 'darwin' && macTrafficIconEnabled) {
+      await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
+      return
+    }
+
+    const iconPath = disableTrayIconColor ? iconPaths.white : iconPaths[status]
+    setTrayImage(iconPath)
+    await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
+  } catch (error) {
+    await trayLogger.warn('Failed to update tray icon with explicit state', error)
+  }
 }
 
 export async function updateTrayIcon(): Promise<void> {
-  if (!tray) return
-
-  const appConfig = await getAppConfig()
-  const { disableTrayIconColor = false } = appConfig
-  const status = await getTrayIconStatus()
-  const iconPaths = getIconPaths()
+  if (!getActiveTray()) return
 
   try {
-    const customIcon = createCustomTrayImageForStatus(appConfig, status)
+    const { disableTrayIconColor = false, customTrayIcon = '' } = await getAppConfig()
+    const status = await getTrayIconStatus()
+    const iconPaths = getIconPaths()
+
+    const customIcon = createCustomTrayImage(customTrayIcon)
     if (customIcon) {
-      tray.setImage(customIcon)
+      getActiveTray()?.setImage(customIcon)
       await updateTrayToolTip(undefined, undefined, true)
       return
     }
@@ -805,7 +885,7 @@ export async function updateTrayIcon(): Promise<void> {
     const iconPath = disableTrayIconColor ? iconPaths.white : iconPaths[status]
     setTrayImage(iconPath)
     await updateTrayToolTip(undefined, undefined, false)
-  } catch {
-    // Failed to update tray icon
+  } catch (error) {
+    await trayLogger.warn('Failed to update tray icon', error)
   }
 }

@@ -153,6 +153,10 @@ export async function closeFloatingWindow(): Promise<void> {
 }
 
 export async function showContextMenu(): Promise<void> {
-  const menu = await buildContextMenu()
-  menu.popup()
+  try {
+    const menu = await buildContextMenu()
+    menu.popup()
+  } catch (error) {
+    logError('Failed to show floating window context menu', error)
+  }
 }

@@ -296,7 +296,9 @@ function setupWindowEvents(window: BrowserWindow): void {
   })
 
   window.on('show', () => {
-    showDockIcon()
+    void showDockIcon().catch((error) => {
+      void mainWindowLogger.warn('Failed to show dock icon', error)
+    })
   })
 
   window.on('close', async (event) => {
@@ -305,19 +307,25 @@ function setupWindowEvents(window: BrowserWindow): void {
     event.preventDefault()
     window.hide()
 
-    const {
-      autoQuitWithoutCore = false,
-      autoQuitWithoutCoreDelay = 60,
-      autoQuitWithoutCoreMode = 'core',
-      useDockIcon = true
-    } = await getAppConfig()
+    try {
+      const {
+        autoQuitWithoutCore = false,
+        autoQuitWithoutCoreDelay = 60,
+        autoQuitWithoutCoreMode = 'core',
+        useDockIcon = true
+      } = await getAppConfig()
 
-    if (!useDockIcon) {
-      hideDockIcon()
-    }
+      if (!useDockIcon) {
+        void hideDockIcon().catch((error) => {
+          void mainWindowLogger.warn('Failed to hide dock icon', error)
+        })
+      }
 
-    if (autoQuitWithoutCore) {
-      scheduleQuitWithoutCore(autoQuitWithoutCoreDelay, autoQuitWithoutCoreMode)
+      if (autoQuitWithoutCore) {
+        scheduleQuitWithoutCore(autoQuitWithoutCoreDelay, autoQuitWithoutCoreMode)
+      }
+    } catch (error) {
+      void mainWindowLogger.error('Failed to handle main window close', error)
     }
   })
 
@@ -344,17 +352,22 @@ function scheduleQuitWithoutCore(
   mode: AutoQuitWithoutCoreMode = 'core'
 ): void {
   clearQuitTimeout()
+  const safeDelaySeconds = Number.isFinite(delaySeconds) ? Math.max(delaySeconds, 5) : 60
   quitTimeout = setTimeout(async () => {
-    if (mode === 'tray') {
-      if (mainWindow && !mainWindow.isVisible()) {
-        mainWindow.destroy()
-        hideDockIcon()
+    try {
+      if (mode === 'tray') {
+        if (mainWindow && !mainWindow.isVisible()) {
+          mainWindow.destroy()
+          void hideDockIcon()
+        }
+        return
       }
-      return
-    }
 
-    await quitWithoutCore()
-  }, delaySeconds * 1000)
+      await quitWithoutCore()
+    } catch (error) {
+      void mainWindowLogger.error('Failed to enter lightweight mode', error)
+    }
+  }, safeDelaySeconds * 1000)
 }
 
 export function clearQuitTimeout(): void {
@@ -365,15 +378,21 @@ export function clearQuitTimeout(): void {
 }
 
 export function triggerMainWindow(force?: boolean): void {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+  if (!getActiveMainWindow()) {
     showMainWindow()
     return
   }
 
   getAppConfig()
     .then(({ triggerMainWindowBehavior = 'toggle' }) => {
+      const window = getActiveMainWindow()
+      if (!window) {
+        showMainWindow()
+        return
+      }
+
       if (force === true || triggerMainWindowBehavior === 'toggle') {
-        if (mainWindow?.isVisible()) {
+        if (window.isVisible()) {
           closeMainWindow()
         } else {
           showMainWindow()
@@ -382,32 +401,61 @@ export function triggerMainWindow(force?: boolean): void {
         showMainWindow()
       }
     })
-    .catch(showMainWindow)
+    .catch((error) => {
+      void mainWindowLogger.warn('Failed to read trigger main window behavior', error)
+      showMainWindow()
+    })
 }
 
 export function showMainWindow(): void {
-  clearQuitTimeout()
-
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    clearQuitTimeout()
-    // 兜底：renderer 已崩溃但 render-process-gone 尚未触发时，先 reload 再显示，避免白屏
-    if (mainWindow.webContents.isCrashed()) {
-      mainWindow.webContents.reload()
-    }
-    mainWindow.show()
-    mainWindow.focusOnWebView()
+  const window = getActiveMainWindow()
+  if (!window) {
+    void createWindow()
+      .then(() => {
+        clearQuitTimeout()
+        const createdWindow = getActiveMainWindow()
+        createdWindow?.show()
+        createdWindow?.focusOnWebView()
+      })
+      .catch((error) => mainWindowLogger.error('Failed to create main window', error))
     return
   }
 
-  void createWindow().then(() => {
+  try {
     clearQuitTimeout()
-    mainWindow?.show()
-    mainWindow?.focusOnWebView()
-  })
+    // 兜底：renderer 已崩溃但 render-process-gone 尚未触发时，先 reload 再显示，避免白屏
+    if (window.webContents.isCrashed()) {
+      window.webContents.reload()
+    }
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+    window.focusOnWebView()
+  } catch (error) {
+    void mainWindowLogger.error('Failed to show main window', error)
+  }
 }
 
 export function closeMainWindow(): void {
-  mainWindow?.close()
+  const window = getActiveMainWindow()
+  if (!window) return
+
+  try {
+    window.close()
+  } catch (error) {
+    void mainWindowLogger.error('Failed to close main window', error)
+  }
+}
+
+function getActiveMainWindow(): BrowserWindow | null {
+  if (!mainWindow) return null
+
+  if (mainWindow.isDestroyed()) {
+    mainWindow = null
+    return null
+  }
+
+  return mainWindow
 }
 
 // 退出兜底：硬退出（app.exit）不触发窗口 close（#1954）。

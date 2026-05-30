@@ -8,6 +8,7 @@ import { primeAdminPrivilegesCache } from './core/admin'
 import { triggerSysProxy, disableSysProxySync } from './sys/sysproxy'
 import { exePath } from './utils/dirs'
 import { saveMainWindowState } from './window'
+import { systemLogger } from './utils/logger'
 
 export function customRelaunch(): void {
   const script = `while kill -0 ${process.pid} 2>/dev/null; do
@@ -100,28 +101,45 @@ export function setupAppLifecycle(): void {
     if (cleanupPromise) return cleanupPromise
 
     cleanupPromise = (async () => {
-      saveMainWindowState() // 硬退出补一次落盘
-
-      cleanupCoreWatcher()
-
-      if (process.platform !== 'darwin') {
-        disableSysProxySync()
-        sysProxyDisabled = true
+      try {
+        saveMainWindowState() // 硬退出补一次落盘
+      } catch (error) {
+        void systemLogger.error('Failed to persist main window state during exit', error)
       }
 
-      const cleanupTasks: Promise<unknown>[] = [stopCoreForExit()]
+      try {
+        cleanupCoreWatcher()
+      } catch (error) {
+        void systemLogger.error('Failed to clean up core watcher during exit', error)
+      }
+
+      if (process.platform !== 'darwin') {
+        try {
+          disableSysProxySync()
+          sysProxyDisabled = true
+        } catch (error) {
+          void systemLogger.error('Failed to disable system proxy sync during exit', error)
+        }
+      }
+
+      const cleanupTasks: Promise<unknown>[] = [
+        stopCoreForExit().catch((error) => {
+          void systemLogger.error('Failed to stop core during exit', error)
+        })
+      ]
       if (process.platform === 'darwin') {
         cleanupTasks.push(
-          triggerSysProxy(false, { helperTimeout: 750, force: true }).then(() => {
-            sysProxyDisabled = true
-          })
+          triggerSysProxy(false, { helperTimeout: 750, force: true })
+            .then(() => {
+              sysProxyDisabled = true
+            })
+            .catch((error) => {
+              void systemLogger.error('Failed to disable system proxy during exit', error)
+            })
         )
       }
 
-      await withTimeout(
-        Promise.allSettled(cleanupTasks).then(() => {}),
-        1200
-      )
+      await withTimeout(Promise.allSettled(cleanupTasks).then(() => {}), 1200)
     })()
 
     return cleanupPromise
@@ -135,25 +153,37 @@ export function setupAppLifecycle(): void {
   // 避免与 powerMonitor.shutdown 重复执行普通、无界的核心和代理清理。
   app.on('browser-window-created', (_event, window) => {
     window.on('session-end', async () => {
-      await cleanupBeforeExit()
-      app.exit()
+      try {
+        await cleanupBeforeExit()
+      } finally {
+        app.exit()
+      }
     })
   })
-
   app.on('before-quit', async (e) => {
     e.preventDefault()
-    await cleanupBeforeExit()
-    app.exit()
+    try {
+      await cleanupBeforeExit()
+    } finally {
+      app.exit()
+    }
   })
 
   powerMonitor.on('shutdown', async () => {
-    await cleanupBeforeExit()
-    app.exit()
+    try {
+      await cleanupBeforeExit()
+    } finally {
+      app.exit()
+    }
   })
 
   app.on('will-quit', () => {
     if (!sysProxyDisabled) {
-      disableSysProxySync()
+      try {
+        disableSysProxySync()
+      } catch (error) {
+        void systemLogger.error('Failed to disable system proxy sync during will-quit', error)
+      }
     }
   })
 }

@@ -1,6 +1,7 @@
 out
 dist
-.claude
+dist*/
+.cursor/
 pnpm-lock.yaml
 LICENSE.md
 tsconfig.json

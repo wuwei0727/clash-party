@@ -24,6 +24,7 @@ export const defaultConfig: IAppConfig = {
   smartCoreCollectData: false,
   smartCoreStrategy: 'sticky-sessions',
   silentStart: false,
+  startAsAdmin: false,
   appTheme: 'system',
   useWindowFrame: false,
   proxyInTray: true,

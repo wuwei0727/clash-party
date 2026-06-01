@@ -93,7 +93,7 @@ interface IpcApi {
   grantTunPermissions: () => Promise<void>
   manualGrantCorePermition: () => Promise<void>
   checkAdminPrivileges: () => Promise<boolean>
-  restartAsAdmin: () => Promise<void>
+  restartAsAdmin: (forTun?: boolean) => Promise<void>
   checkMihomoCorePermissions: () => Promise<boolean>
   checkHighPrivilegeCore: () => Promise<boolean>
   showTunPermissionDialog: () => Promise<boolean>

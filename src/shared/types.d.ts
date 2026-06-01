@@ -352,6 +352,7 @@ interface IAppConfig {
   silentUpdate: boolean
   githubProxy?: string
   silentStart: boolean
+  startAsAdmin?: boolean
   autoCloseConnection: boolean
   sysProxy: ISysProxyConfig
   maxLogDays: number

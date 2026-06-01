@@ -15,6 +15,7 @@ import { BiCopy, BiSolidFileImport } from 'react-icons/bi'
 import useSWR from 'swr'
 import {
   applyTheme,
+  checkAdminPrivileges,
   checkAutoRun,
   closeFloatingWindow,
   closeTrayIcon,
@@ -26,6 +27,7 @@ import {
   importThemes,
   relaunchApp,
   readImageFileDataURL,
+  restartAsAdmin,
   resolveThemes,
   showFloatingWindow,
   showTrayIcon,
@@ -69,6 +71,7 @@ const GeneralConfig: React.FC = () => {
   const [trayIconCropTarget, setTrayIconCropTarget] = useState<TrayIconCropTarget>('custom')
   const [trayIconDrawerOpen, setTrayIconDrawerOpen] = useState(false)
   const [showHardwareAccelConfirm, setShowHardwareAccelConfirm] = useState(false)
+  const [showStartAsAdminConfirm, setShowStartAsAdminConfirm] = useState(false)
   const [pendingHardwareAccelValue, setPendingHardwareAccelValue] = useState(false)
   const { setTheme } = useTheme()
   const {
@@ -102,6 +105,7 @@ const GeneralConfig: React.FC = () => {
     githubProxy = 'auto',
     appTheme = 'system',
     language = 'zh-CN',
+    startAsAdmin = false,
     triggerMainWindowBehavior = 'show',
     hideConnectionCardWave = false,
     disableAppLog = false
@@ -234,6 +238,24 @@ const GeneralConfig: React.FC = () => {
           }}
         />
       )}
+      {showStartAsAdminConfirm && (
+        <BaseConfirmModal
+          isOpen={showStartAsAdminConfirm}
+          title={t('settings.startAsAdmin.restart.title')}
+          content={t('settings.startAsAdmin.restart.content')}
+          onCancel={() => {
+            setShowStartAsAdminConfirm(false)
+          }}
+          onConfirm={async () => {
+            setShowStartAsAdminConfirm(false)
+            try {
+              await restartAsAdmin(false)
+            } catch (e) {
+              toast.error(String(e))
+            }
+          }}
+        />
+      )}
       {trayIconCropDataURL && (
         <TrayIconCropModal
           imageDataURL={trayIconCropDataURL}
@@ -302,6 +324,38 @@ const GeneralConfig: React.FC = () => {
             }}
           />
         </SettingItem>
+        {platform === 'win32' && (
+          <SettingItem
+            title={t('settings.startAsAdmin')}
+            actions={
+              <Tooltip content={t('settings.startAsAdminTooltip')}>
+                <Button isIconOnly size="sm" variant="light">
+                  <IoIosHelpCircle className="text-lg" />
+                </Button>
+              </Tooltip>
+            }
+            divider
+          >
+            <Switch
+              size="sm"
+              isSelected={startAsAdmin}
+              onValueChange={async (v) => {
+                try {
+                  await patchAppConfig({ startAsAdmin: v })
+                  if (enable) {
+                    await enableAutoRun()
+                    mutateEnable()
+                  }
+                  if (v && !(await checkAdminPrivileges())) {
+                    setShowStartAsAdminConfirm(true)
+                  }
+                } catch (e) {
+                  toast.error(String(e))
+                }
+              }}
+            />
+          </SettingItem>
+        )}
         <SettingItem title={t('settings.autoCheckUpdate')} divider>
           <Switch
             size="sm"

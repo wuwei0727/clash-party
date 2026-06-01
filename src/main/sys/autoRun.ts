@@ -8,6 +8,7 @@ import { app } from 'electron'
 import { exePath, homeDir } from '../utils/dirs'
 import { managerLogger } from '../utils/logger'
 import { checkAdminPrivileges } from '../core/admin'
+import { getAppConfig } from '../config'
 
 const appName = 'mihomo-party'
 // 1.x 通过 AppleScript 往 System Events 写登录项，这些旧条目不受 Service Management 管理，
@@ -115,7 +116,8 @@ export async function enableAutoRun(): Promise<void> {
     const regPath = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
     const taskFilePath = path.join(tmpdir(), `${appName}.xml`)
     const isAdmin = await checkAdminPrivileges()
-    await writeFile(taskFilePath, Buffer.from(`\ufeff${getTaskXml(isAdmin)}`, 'utf-16le'))
+    const { startAsAdmin = false } = await getAppConfig()
+    await writeFile(taskFilePath, Buffer.from(`\ufeff${getTaskXml(startAsAdmin)}`, 'utf-16le'))
 
     let taskCreated = false
 

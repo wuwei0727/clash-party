@@ -371,6 +371,7 @@ interface IAppConfig {
   silentUpdate: boolean
   githubProxy?: string
   silentStart: boolean
+  startAsAdmin?: boolean
   autoCloseConnection: boolean
   autoCloseConnectionOnlyGroup?: boolean
   sysProxy: ISysProxyConfig

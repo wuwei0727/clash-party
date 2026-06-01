@@ -24,6 +24,7 @@ export const defaultConfig: IAppConfig = {
   smartCoreUseLightGBM: false,
   smartCoreCollectData: false,
   silentStart: false,
+  startAsAdmin: false,
   appTheme: 'system',
   useWindowFrame: false,
   proxyInTray: true,

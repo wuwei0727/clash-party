@@ -7,7 +7,7 @@ import {
   patchControledMihomoConfig
 } from '../config'
 import { triggerSysProxy } from '../sys/sysproxy'
-import { quitWithoutCore } from '../core/manager'
+import { quitWithoutCore, setTunMode } from '../core/manager'
 import i18next from '../../shared/i18n'
 import { floatingWindow, triggerFloatingWindow } from './floatingWindow'
 import { copyEnv, updateTrayIcon } from './tray'
@@ -64,18 +64,14 @@ export async function registerShortcut(
         const { tun } = await getControledMihomoConfig()
         const enable = tun?.enable ?? false
         try {
-          if (!enable) {
-            await patchControledMihomoConfig({ tun: { enable: !enable }, dns: { enable: true } })
-          } else {
-            await patchControledMihomoConfig({ tun: { enable: !enable } })
-          }
+          await setTunMode(!enable)
           new Notification({
             title: i18next.t(
               !enable ? 'common.notification.tunEnabled' : 'common.notification.tunDisabled'
             )
           }).show()
           mainWindow?.webContents.send('controledMihomoConfigUpdated')
-          floatingWindow?.webContents.send('appConfigUpdated')
+          floatingWindow?.webContents.send('controledMihomoConfigUpdated')
         } catch {
           // ignore
         } finally {

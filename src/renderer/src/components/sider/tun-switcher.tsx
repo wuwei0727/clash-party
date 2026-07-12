@@ -3,11 +3,12 @@ import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-c
 import BorderSwitch from '@renderer/components/base/border-switch'
 import { TbDeviceIpadHorizontalBolt } from 'react-icons/tb'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { updateTrayIconImmediate } from '@renderer/utils/ipc'
+import { setTunMode } from '@renderer/utils/ipc'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import React from 'react'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
+import { toast } from '@renderer/components/base/toast'
 import { useTranslation } from 'react-i18next'
 
 interface Props {
@@ -22,10 +23,11 @@ const TunSwitcher: React.FC<Props> = (props) => {
   const match = location.pathname.includes('/tun') || false
   const { appConfig } = useAppConfig()
   const { tunCardStatus = 'col-span-1', disableAnimations = false } = appConfig || {}
-  const sysProxyEnabled = appConfig?.sysProxy?.enable ?? false
-  const { controledMihomoConfig, patchControledMihomoConfig } = useControledMihomoConfig()
+  const { controledMihomoConfig, mutateControledMihomoConfig } = useControledMihomoConfig()
   const { tun } = controledMihomoConfig || {}
   const { enable } = tun || {}
+  const [pendingEnable, setPendingEnable] = React.useState<boolean | null>(null)
+  const selected = pendingEnable ?? enable ?? false
   const {
     attributes,
     listeners,
@@ -37,9 +39,18 @@ const TunSwitcher: React.FC<Props> = (props) => {
     id: 'tun'
   })
   const transform = tf ? { x: tf.x, y: tf.y, scaleX: 1, scaleY: 1 } : null
-  const onChange = async (enable: boolean): Promise<void> => {
-    updateTrayIconImmediate(sysProxyEnabled, enable)
-    if (enable) {
+
+  React.useEffect(() => {
+    if (pendingEnable !== null && enable === pendingEnable) {
+      setPendingEnable(null)
+    }
+  }, [enable, pendingEnable])
+
+  const onChange = async (nextEnable: boolean): Promise<void> => {
+    if (pendingEnable !== null) return
+
+    setPendingEnable(nextEnable)
+    if (nextEnable) {
       try {
         // 检查内核权限
         const hasPermissions = await window.electron.ipcRenderer.invoke(
@@ -57,50 +68,51 @@ const TunSwitcher: React.FC<Props> = (props) => {
                 return
               } catch (error) {
                 console.error('Failed to restart as admin:', error)
-                await window.electron.ipcRenderer.invoke(
-                  'showErrorDialog',
-                  t('tun.permissions.failed'),
-                  String(error)
-                )
-                updateTrayIconImmediate(sysProxyEnabled, false)
+                  await window.electron.ipcRenderer.invoke(
+                    'showErrorDialog',
+                    t('tun.permissions.failed'),
+                    String(error)
+                  )
+                  setPendingEnable(null)
+                  return
+                }
+              } else {
+                setPendingEnable(null)
                 return
               }
             } else {
-              updateTrayIconImmediate(sysProxyEnabled, false)
-              return
-            }
-          } else {
             // macOS/Linux下尝试自动获取权限
             try {
               await window.electron.ipcRenderer.invoke('requestTunPermissions')
             } catch (error) {
               console.warn('Permission grant failed:', error)
-              await window.electron.ipcRenderer.invoke(
-                'showErrorDialog',
-                t('tun.permissions.failed'),
-                String(error)
-              )
-              updateTrayIconImmediate(sysProxyEnabled, false)
-              return
-            }
-          }
+                  await window.electron.ipcRenderer.invoke(
+                    'showErrorDialog',
+                    t('tun.permissions.failed'),
+                    String(error)
+                  )
+                  setPendingEnable(null)
+                  return
+                }
+              }
         }
       } catch (error) {
         console.warn('Permission check failed:', error)
       }
-
-      await patchControledMihomoConfig({ tun: { enable }, dns: { enable: true } })
-      if (enable) {
-        const autoRunEnabled = await window.electron.ipcRenderer.invoke('checkAutoRun')
-        if (autoRunEnabled) {
-          await window.electron.ipcRenderer.invoke('enableAutoRun')
-        }
-      }
-    } else {
-      await patchControledMihomoConfig({ tun: { enable } })
     }
-    window.electron.ipcRenderer.send('updateFloatingWindow')
-    window.electron.ipcRenderer.send('updateTrayMenu')
+
+    try {
+      await setTunMode(nextEnable)
+      if (nextEnable && appConfig?.silentStart) {
+          await window.electron.ipcRenderer.invoke('enableAutoRun')
+      }
+      window.electron.ipcRenderer.send('updateFloatingWindow')
+    } catch (error) {
+      setPendingEnable(null)
+      toast.error(String(error))
+    } finally {
+      mutateControledMihomoConfig()
+    }
   }
 
   if (iconOnly) {
@@ -153,8 +165,9 @@ const TunSwitcher: React.FC<Props> = (props) => {
               />
             </Button>
             <BorderSwitch
-              isShowBorder={match && enable}
-              isSelected={enable ?? false}
+              isShowBorder={match && selected}
+              isSelected={selected}
+              isDisabled={pendingEnable !== null}
               onValueChange={onChange}
             />
           </div>

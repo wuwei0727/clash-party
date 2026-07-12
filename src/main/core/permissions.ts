@@ -361,7 +361,7 @@ export async function validateTunPermissionsOnStartup(
     managerLogger.warn(
       'TUN is enabled but insufficient permissions detected, auto-disabling TUN...'
     )
-    await patchControledMihomoConfig({ tun: { enable: false } })
+    await patchControledMihomoConfig({ tun: { enable: false } }, { hotPatch: false })
 
     const { mainWindow } = await import('../index')
     mainWindow?.webContents.send('controledMihomoConfigUpdated')
@@ -381,7 +381,10 @@ export async function checkAdminRestartForTun(restartCore: () => Promise<void>):
       if (process.platform === 'win32') {
         const hasAdminPrivileges = await checkAdminPrivileges()
         if (hasAdminPrivileges) {
-          await patchControledMihomoConfig({ tun: { enable: true }, dns: { enable: true } })
+          await patchControledMihomoConfig(
+            { tun: { enable: true }, dns: { enable: true } },
+            { hotPatch: false }
+          )
 
           const autoRunEnabled = await checkAutoRun()
           if (autoRunEnabled) {

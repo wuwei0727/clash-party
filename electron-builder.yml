@@ -35,8 +35,6 @@ fileAssociations:
 win:
   target:
     - nsis
-    - 7z
-  artifactName: clash-party-windows-${version}-${arch}-portable.${ext}
 nsis:
   artifactName: clash-party-windows-${version}-${arch}-setup.${ext}
   uninstallDisplayName: ${productName}

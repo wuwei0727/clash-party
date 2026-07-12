@@ -103,6 +103,7 @@ let automaticRestartController: AbortController | null = null
 const tunStartupTimeoutMs = 75_000
 const windowsTunSelfTestTimeoutMs = 65_000
 let tunModeOperation: Promise<void> | null = null
+let tunModeTarget: boolean | null = null
 
 interface TunStartupWaiter {
   resolve: () => void
@@ -518,7 +519,7 @@ function formatWindowsTunSelfTest(selfTest: IWindowsTunSelfTestResult): string {
     details.push(`错误：${selfTest.error}`)
   }
   if (selfTest.requiresRestart) {
-    details.push('需要重启 Windows 后再验证。')
+    details.push('需要修复或重启 Windows 虚拟网络栈后再验证。')
   }
   if (selfTest.logs.length) {
     details.push(`关键日志：${selfTest.logs.join(' | ')}`)
@@ -541,7 +542,9 @@ function formatWindowsTunDiagnostics(diagnostics: IWindowsTunDiagnostics): strin
   }
 
   if (diagnostics.runningServices.length) {
-    details.push(`正在运行的相关服务：${diagnostics.runningServices.join(', ')}`)
+    details.push(
+      `可能正在使用独立虚拟网卡的服务（仅提示，不会自动停止）：${diagnostics.runningServices.join(', ')}`
+    )
   }
 
   if (diagnostics.selfTest && diagnostics.selfTest.status !== 'passed') {
@@ -880,7 +883,7 @@ for ($pass = 0; $pass -lt 4; $pass++) {
   $blocks = $text -split "(?:\\r?\\n){2,}"
   $instanceIds = @()
   foreach ($block in $blocks) {
-    if ($block -match "Instance ID:\\s+(SWD\\\\Wintun\\\\[^\\r\\n]+)") {
+    if ($block -match "(?:Instance ID|实例\\s*ID):\\s+(SWD\\\\Wintun\\\\[^\\r\\n]+)") {
       $instanceIds += $matches[1].Trim()
     }
   }
@@ -898,7 +901,15 @@ for ($pass = 0; $pass -lt 4; $pass++) {
   }
   Start-Sleep -Seconds 2
 }
-pnputil.exe /restart-device "ROOT\\VMS_VSMP\\0000" | Out-Null
+Get-Service -Name NetSetupSvc,DsmSvc,DeviceInstall,NlaSvc,hns -ErrorAction SilentlyContinue |
+  Where-Object { $_.Status -ne 'Running' } |
+  Start-Service -ErrorAction SilentlyContinue
+$vmsmpInstanceIds = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+  Where-Object { $_.InstanceId -match "^ROOT\\\\VMS_VSMP\\\\" -and $_.Status -ne "OK" } |
+  Select-Object -ExpandProperty InstanceId -Unique
+foreach ($instanceId in $vmsmpInstanceIds) {
+  pnputil.exe /restart-device "$instanceId" | Out-Null
+}
 pnputil.exe /scan-devices | Out-Null
 Start-Sleep -Seconds 2
 `
@@ -951,7 +962,8 @@ export async function repairWindowsTunEnvironment(
     type: 'warning',
     title: i18next.t('tun.wintunRepair.confirmTitle') || '修复 Wintun 环境',
     message:
-      i18next.t('tun.wintunRepair.confirmMessage') || '将删除异常 Wintun 虚拟网卡，继续？',
+      i18next.t('tun.wintunRepair.confirmMessage') ||
+      '将删除异常 Wintun 虚拟网卡并尝试刷新 Windows 虚拟网络设备；不会停止 EasyTier/EasyTier-Core，继续？',
     detail: formatWindowsTunDiagnostics(diagnostics),
     buttons: [confirmText, cancelText],
     defaultId: 0,
@@ -1482,17 +1494,24 @@ setStopCoreBeforeAdminRestart(stopCore)
 
 export async function setTunMode(enable: boolean): Promise<void> {
   if (tunModeOperation) {
+    if (tunModeTarget === enable) {
+      await tunModeOperation
+      return
+    }
+
     throw new Error('TUN 正在切换中，请等待当前操作完成')
   }
 
   const operation = setTunModeInternal(enable)
   tunModeOperation = operation
+  tunModeTarget = enable
 
   try {
     await operation
   } finally {
     if (tunModeOperation === operation) {
       tunModeOperation = null
+      tunModeTarget = null
     }
   }
 }

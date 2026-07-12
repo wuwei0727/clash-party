@@ -523,7 +523,7 @@
   "tun.wintun.checkFailed": "Wintun 检测失败",
   "tun.wintun.repairFailed": "Wintun 修复失败",
   "tun.wintunRepair.confirmTitle": "修复 Wintun 环境",
-  "tun.wintunRepair.confirmMessage": "将停止 EasyTier/EasyTier-Core 并删除异常 Wintun 虚拟网卡，继续？",
+  "tun.wintunRepair.confirmMessage": "将删除异常 Wintun 虚拟网卡并尝试刷新 Windows 虚拟网络设备；不会停止 EasyTier/EasyTier-Core，继续？",
   "tun.permissions.title": "需要管理员权限",
   "tun.permissions.message": "启用 TUN 模式需要管理员权限，是否现在重启应用获取权限？",
   "tun.permissions.failed": "权限授权失败",

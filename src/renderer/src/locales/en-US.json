@@ -523,7 +523,7 @@
   "tun.wintun.checkFailed": "Wintun check failed",
   "tun.wintun.repairFailed": "Wintun repair failed",
   "tun.wintunRepair.confirmTitle": "Repair Wintun Environment",
-  "tun.wintunRepair.confirmMessage": "This will stop EasyTier/EasyTier-Core and remove abnormal Wintun adapters. Continue?",
+  "tun.wintunRepair.confirmMessage": "This will remove abnormal Wintun adapters and refresh Windows virtual network devices. EasyTier/EasyTier-Core will not be stopped. Continue?",
   "tun.permissions.title": "Administrator Privileges Required",
   "tun.permissions.message": "TUN mode requires administrator privileges. Restart the application now to get permissions?",
   "tun.permissions.failed": "Permission authorization failed",

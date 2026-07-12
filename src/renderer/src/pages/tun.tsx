@@ -6,7 +6,9 @@ import SettingItem from '@renderer/components/base/base-setting-item'
 import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-config'
 import {
   grantTunPermissions,
+  getWindowsTunDiagnostics,
   mihomoHotReloadConfig,
+  repairWindowsTunEnvironment,
   restartCore,
   setupFirewall
 } from '@renderer/utils/ipc'
@@ -25,6 +27,7 @@ const Tun: React.FC = () => {
   const { autoSetDNS = true } = appConfig || {}
   const { tun } = controledMihomoConfig || {}
   const [loading, setLoading] = useState(false)
+  const [wintunLoading, setWintunLoading] = useState(false)
   const {
     device = getDefaultMihomoTunDevice(platform),
     stack = DEFAULT_MIHOMO_TUN_CONFIG.stack,
@@ -106,6 +109,90 @@ const Tun: React.FC = () => {
     }
   }
 
+  const formatWindowsTunDiagnostics = (diagnostics: IWindowsTunDiagnostics): string => {
+    const details: string[] = []
+
+    if (diagnostics.problemDevices.length) {
+      details.push(
+        diagnostics.problemDevices
+          .map((device) => `${device.description} | ${device.problem} | ${device.instanceId}`)
+          .join('\n')
+      )
+    }
+
+    if (diagnostics.networkProblemDevices.length) {
+      details.push(
+        diagnostics.networkProblemDevices
+          .map((device) => `${device.description} | ${device.problem} | ${device.instanceId}`)
+          .join('\n')
+      )
+    }
+
+    if (diagnostics.selfTest && diagnostics.selfTest.status !== 'passed') {
+      const selfTestDetails = [diagnostics.selfTest.message]
+      if (diagnostics.selfTest.error) selfTestDetails.push(diagnostics.selfTest.error)
+      if (diagnostics.selfTest.requiresRestart) selfTestDetails.push('需要重启 Windows 后再验证')
+      if (diagnostics.selfTest.logs.length) {
+        selfTestDetails.push(diagnostics.selfTest.logs.join('\n'))
+      }
+      details.push(selfTestDetails.join('\n'))
+    }
+
+    if (!details.length) {
+      return t('tun.wintun.noProblem')
+    }
+
+    return details.join('\n\n')
+  }
+
+  const hasWindowsTunIssue = (diagnostics: IWindowsTunDiagnostics): boolean => {
+    return (
+      diagnostics.problemDevices.length > 0 ||
+      diagnostics.networkProblemDevices.length > 0 ||
+      diagnostics.selfTest?.status === 'failed' ||
+      diagnostics.selfTest?.status === 'skipped'
+    )
+  }
+
+  const onCheckWindowsTun = async (): Promise<void> => {
+    setWintunLoading(true)
+    try {
+      const diagnostics = await getWindowsTunDiagnostics({ includeSelfTest: true })
+      if (hasWindowsTunIssue(diagnostics)) {
+        showErrorSync(
+          new Error(formatWindowsTunDiagnostics(diagnostics)),
+          t('tun.wintun.problemTitle')
+        )
+      } else {
+        new Notification(t('tun.notifications.wintunCheckSuccess'))
+      }
+    } catch (e) {
+      showErrorSync(e, t('tun.wintun.checkFailed'))
+    } finally {
+      setWintunLoading(false)
+    }
+  }
+
+  const onRepairWindowsTun = async (): Promise<void> => {
+    setWintunLoading(true)
+    try {
+      const diagnostics = await repairWindowsTunEnvironment()
+      if (hasWindowsTunIssue(diagnostics)) {
+        showErrorSync(
+          new Error(formatWindowsTunDiagnostics(diagnostics)),
+          t('tun.wintun.problemTitle')
+        )
+      } else {
+        new Notification(t('tun.notifications.wintunRepairSuccess'))
+        await restartCore()
+      }
+    } catch (e) {
+      showErrorSync(e, t('tun.wintun.repairFailed'))
+    } finally {
+      setWintunLoading(false)
+    }
+  }
+
   return (
     <>
       <BasePage
@@ -139,27 +226,50 @@ const Tun: React.FC = () => {
       >
         <SettingCard className="tun-settings">
           {platform === 'win32' && (
-            <SettingItem title={t('tun.firewall.title')} divider>
-              <Button
-                size="sm"
-                color="primary"
-                isLoading={loading}
-                onPress={async () => {
-                  setLoading(true)
-                  try {
-                    await setupFirewall()
-                    new Notification(t('tun.notifications.firewallResetSuccess'))
-                    await restartCore()
-                  } catch (e) {
-                    showErrorSync(e, t('common.error.firewallSetupFailed'))
-                  } finally {
-                    setLoading(false)
-                  }
-                }}
-              >
-                {t('tun.firewall.reset')}
-              </Button>
-            </SettingItem>
+            <>
+              <SettingItem title={t('tun.firewall.title')} divider>
+                <Button
+                  size="sm"
+                  color="primary"
+                  isLoading={loading}
+                  onPress={async () => {
+                    setLoading(true)
+                    try {
+                      await setupFirewall()
+                      new Notification(t('tun.notifications.firewallResetSuccess'))
+                      await restartCore()
+                    } catch (e) {
+                      showErrorSync(e, t('common.error.firewallSetupFailed'))
+                    } finally {
+                      setLoading(false)
+                    }
+                  }}
+                >
+                  {t('tun.firewall.reset')}
+                </Button>
+              </SettingItem>
+              <SettingItem title={t('tun.wintun.title')} divider>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    color="primary"
+                    variant="flat"
+                    isLoading={wintunLoading}
+                    onPress={onCheckWindowsTun}
+                  >
+                    {t('tun.wintun.check')}
+                  </Button>
+                  <Button
+                    size="sm"
+                    color="warning"
+                    isLoading={wintunLoading}
+                    onPress={onRepairWindowsTun}
+                  >
+                    {t('tun.wintun.repair')}
+                  </Button>
+                </div>
+              </SettingItem>
+            </>
           )}
           {platform !== 'win32' && (
             <SettingItem title={t('tun.core.title')} divider>

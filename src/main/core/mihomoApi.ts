@@ -653,7 +653,17 @@ export async function SysProxyStatus(): Promise<boolean> {
   return appConfig?.sysProxy?.enable === true
 }
 
+let tunStatusOverride: boolean | null = null
+
+export function setTunStatusOverride(status: boolean | null): void {
+  tunStatusOverride = status
+}
+
 export const TunStatus = async (): Promise<boolean> => {
+  if (tunStatusOverride !== null) {
+    return tunStatusOverride
+  }
+
   const config = await getControledMihomoConfig()
   return config?.tun?.enable === true
 }

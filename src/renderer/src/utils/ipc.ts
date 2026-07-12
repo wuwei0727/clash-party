@@ -98,6 +98,11 @@ interface IpcApi {
   checkHighPrivilegeCore: () => Promise<boolean>
   showTunPermissionDialog: () => Promise<boolean>
   showErrorDialog: (title: string, message: string) => Promise<void>
+  setTunMode: (enable: boolean) => Promise<void>
+  getWindowsTunDiagnostics: (
+    options?: IWindowsTunDiagnosticsOptions
+  ) => Promise<IWindowsTunDiagnostics>
+  repairWindowsTunEnvironment: () => Promise<IWindowsTunDiagnostics>
   openUWPTool: () => Promise<void>
   setupFirewall: () => Promise<void>
   getInterfaces: () => Promise<Record<string, NetworkInterfaceInfo[]>>
@@ -271,6 +276,9 @@ export const {
   checkHighPrivilegeCore,
   showTunPermissionDialog,
   showErrorDialog,
+  setTunMode,
+  getWindowsTunDiagnostics,
+  repairWindowsTunEnvironment,
   openUWPTool,
   setupFirewall,
   getInterfaces,

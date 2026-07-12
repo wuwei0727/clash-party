@@ -443,6 +443,33 @@ interface IMihomoTunConfig {
   'include-package'?: string[]
   'exclude-package'?: string[]
 }
+
+interface IWindowsTunProblemDevice {
+  description: string
+  instanceId: string
+  problem: string
+}
+
+interface IWindowsTunSelfTestResult {
+  status: 'passed' | 'failed' | 'skipped'
+  message: string
+  error?: string
+  requiresRestart?: boolean
+  logs: string[]
+}
+
+interface IWindowsTunDiagnosticsOptions {
+  includeSelfTest?: boolean
+}
+
+interface IWindowsTunDiagnostics {
+  isAdmin: boolean
+  problemDevices: IWindowsTunProblemDevice[]
+  networkProblemDevices: IWindowsTunProblemDevice[]
+  runningServices: string[]
+  selfTest?: IWindowsTunSelfTestResult
+}
+
 interface IMihomoDNSConfig {
   enable?: boolean
   listen?: string

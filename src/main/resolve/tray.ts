@@ -363,9 +363,17 @@ export const buildContextMenu = async (): Promise<Menu> => {
             await refreshTrayUiWithState(sysProxyEnabled, enable)
           } catch (error) {
             item.checked = previousEnable
+            try {
+              await patchControledMihomoConfig(
+                { tun: { enable: previousEnable } },
+                { hotPatch: false }
+              )
+            } catch (rollbackError) {
+              await trayLogger.warn('Failed to rollback TUN config from tray', rollbackError)
+            }
             sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
             sendToWindow(floatingWindow, 'controledMihomoConfigUpdated')
-            await refreshTrayUi()
+            await refreshTrayUiWithState(sysProxyEnabled, previousEnable)
             await trayLogger.error('Failed to toggle TUN from tray', error)
           }
         })

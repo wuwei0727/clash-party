@@ -76,7 +76,10 @@ import {
   requestTunPermissions,
   checkHighPrivilegeCore,
   showTunPermissionDialog,
-  showErrorDialog
+  showErrorDialog,
+  setTunMode,
+  getWindowsTunDiagnostics,
+  repairWindowsTunEnvironment
 } from '../core/manager'
 import { triggerSysProxy } from '../sys/sysproxy'
 import { checkUpdate, downloadAndInstallUpdate } from '../resolve/autoUpdater'
@@ -311,6 +314,9 @@ const asyncHandlers: Record<string, AsyncFn> = {
   checkHighPrivilegeCore,
   showTunPermissionDialog,
   showErrorDialog,
+  setTunMode,
+  getWindowsTunDiagnostics,
+  repairWindowsTunEnvironment,
   openUWPTool,
   setupFirewall,
   copyEnv,

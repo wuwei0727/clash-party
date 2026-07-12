@@ -12,3 +12,5 @@ party.md
 CLAUDE.md
 agent.md
 tsconfig.node.tsbuildinfo
+docs
+.ace-tool/

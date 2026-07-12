@@ -16,6 +16,10 @@ const controledMihomoLogger = createLogger('ControledMihomo')
 let controledMihomoConfig: Partial<IMihomoConfig> // mihomo.yaml
 const controledMihomoWriteQueue = new WriteQueue()
 
+interface PatchControledMihomoConfigOptions {
+  hotPatch?: boolean
+}
+
 function cloneDefaultControledMihomoConfig(): Partial<IMihomoConfig> {
   return JSON.parse(JSON.stringify(defaultControledMihomoConfig)) as Partial<IMihomoConfig>
 }
@@ -55,8 +59,12 @@ export async function getControledMihomoConfig(force = false): Promise<Partial<I
   return controledMihomoConfig
 }
 
-export async function patchControledMihomoConfig(patch: Partial<IMihomoConfig>): Promise<void> {
+export async function patchControledMihomoConfig(
+  patch: Partial<IMihomoConfig>,
+  options: PatchControledMihomoConfigOptions = {}
+): Promise<void> {
   await controledMihomoWriteQueue.run(async () => {
+    const { hotPatch = true } = options
     const appConfig = await getAppConfig()
     const {
       controlDns = DEFAULT_CONTROL_DNS,
@@ -131,13 +139,16 @@ export async function patchControledMihomoConfig(patch: Partial<IMihomoConfig>):
     }
 
     // 优先对运行中内核进行热更新，避免无意义重启
-    try {
-      await patchMihomoConfig(nextPatch)
-    } catch (error) {
-      controledMihomoLogger.warn(
-        'Hot patch /configs failed, changes will apply on next restart',
-        error
-      )
+    if (hotPatch) {
+      // 优先对运行中内核进行热更新，避免无意义重启
+      try {
+        await patchMihomoConfig(nextPatch)
+      } catch (error) {
+        controledMihomoLogger.warn(
+          'Hot patch /configs failed, changes will apply on next restart',
+          error
+        )
+      }
     }
 
     // log-level 改变时重连日志 WebSocket，使新等级立刻生效

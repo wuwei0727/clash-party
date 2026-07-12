@@ -100,8 +100,12 @@ let coreOperationTail: Promise<void> = Promise.resolve()
 let pendingRestart: Promise<void> | null = null
 let cancelActiveStartup: ((reason: Error) => void) | null = null
 let automaticRestartController: AbortController | null = null
+let isStoppingCore = false
 const tunStartupTimeoutMs = 75_000
 const windowsTunSelfTestTimeoutMs = 65_000
+const coreShutdownTimeoutMs = 12_000
+const coreShutdownPollIntervalMs = 200
+const windowsTunSelfTestRetryDelayMs = 2_000
 let tunModeOperation: Promise<void> | null = null
 let tunModeTarget: boolean | null = null
 
@@ -228,6 +232,144 @@ function startCoreProcessWatchdog(proc: ChildProcess, detached: boolean): void {
       `Core process watchdog exited unexpectedly, code: ${code}, signal: ${signal}`
     )
   })
+}
+
+function isAdminRestartForTunProcess(): boolean {
+  return process.argv.includes('--admin-restart-for-tun')
+}
+
+function isTransientTunAddressConflict(message?: string): boolean {
+  return /set ipv4 address:\s*The object already exists/i.test(message || '')
+}
+
+async function waitForPidExit(pid: number, timeoutMs = coreShutdownTimeoutMs): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') {
+        return true
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, coreShutdownPollIntervalMs))
+  }
+
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === 'ESRCH'
+  }
+}
+
+async function waitForChildProcessExit(
+  proc: ChildProcess,
+  timeoutMs = coreShutdownTimeoutMs
+): Promise<boolean> {
+  if (proc.exitCode !== null || proc.signalCode !== null) {
+    return true
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    let finished = false
+    const cleanup = (): void => {
+      proc.off('exit', handleExit)
+      proc.off('close', handleClose)
+    }
+    const finish = (value: boolean): void => {
+      if (finished) return
+      finished = true
+      cleanup()
+      resolve(value)
+    }
+    const handleExit = (): void => finish(true)
+    const handleClose = (): void => finish(true)
+
+    proc.once('exit', handleExit)
+    proc.once('close', handleClose)
+
+    setTimeout(() => finish(false), timeoutMs).unref()
+  })
+}
+
+async function terminateTrackedCoreProcess(proc: ChildProcess): Promise<void> {
+  if (proc.exitCode !== null || proc.signalCode !== null) {
+    return
+  }
+
+  const pid = proc.pid
+
+  try {
+    proc.kill('SIGINT')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') {
+      managerLogger.warn('Failed to send SIGINT to core process', error)
+    }
+  }
+
+  let exited = await waitForChildProcessExit(proc)
+  if (exited) {
+    return
+  }
+
+  if (!pid) {
+    return
+  }
+
+  managerLogger.warn(`Core process ${pid} did not exit in time, forcing termination`)
+  try {
+    proc.kill()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') {
+      managerLogger.warn('Failed to force terminate core process', error)
+    }
+  }
+
+  exited = await waitForPidExit(pid, 3_000)
+  if (!exited) {
+    managerLogger.warn(`Core process ${pid} is still alive after forced termination timeout`)
+  }
+}
+
+async function terminateCorePid(pid: number): Promise<void> {
+  try {
+    process.kill(pid, 0)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') {
+      return
+    }
+    throw error
+  }
+
+  try {
+    process.kill(pid, 'SIGINT')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') {
+      managerLogger.warn(`Failed to send SIGINT to stale core pid ${pid}`, error)
+    }
+  }
+
+  let exited = await waitForPidExit(pid)
+  if (exited) {
+    return
+  }
+
+  managerLogger.warn(`Stale core pid ${pid} did not exit in time, forcing termination`)
+  try {
+    process.kill(pid)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') {
+      managerLogger.warn(`Failed to force terminate stale core pid ${pid}`, error)
+    }
+  }
+
+  exited = await waitForPidExit(pid, 3_000)
+  if (!exited) {
+    managerLogger.warn(`Stale core pid ${pid} is still alive after forced termination timeout`)
+  }
 }
 
 function notifyControledMihomoConfigUpdated(): void {
@@ -448,27 +590,10 @@ async function stopPidFileCore(): Promise<void> {
 
   const pidString = await readFile(pidPath, 'utf-8').catch(() => '')
   const pid = parseInt(pidString.trim())
-  if (!isNaN(pid)) {
+  if (!isNaN(pid) && pid > 0 && pid !== process.pid) {
     try {
       if (await verifyProcessOwner(pid, coreProcessNames)) {
-        process.kill(pid, 'SIGINT')
-        const deadline = Date.now() + 500
-        let stillRunning = true
-        while (stillRunning && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 50))
-          try {
-            process.kill(pid, 0)
-          } catch {
-            stillRunning = false
-          }
-        }
-        if (stillRunning) {
-          try {
-            process.kill(pid, 'SIGKILL')
-          } catch {
-            // ignore
-          }
-        }
+        await terminateCorePid(pid)
       } else {
         managerLogger.info(`PID ${pid} is not a known mihomo process, skipping kill`)
       }
@@ -854,11 +979,25 @@ async function assertWindowsWintunReady(offerRepair = false): Promise<void> {
   if (process.platform !== 'win32') return
 
   try {
-    let diagnostics = await getWindowsTunDiagnostics()
+    let diagnostics = await getWindowsTunDiagnostics({ includeSelfTest: offerRepair })
+
+    if (
+      offerRepair &&
+      isAdminRestartForTunProcess() &&
+      diagnostics.selfTest?.status === 'failed' &&
+      isTransientTunAddressConflict(diagnostics.selfTest.error)
+    ) {
+      managerLogger.warn(
+        'Detected transient TUN self-test address conflict after admin restart, retrying once'
+      )
+      await new Promise((resolve) => setTimeout(resolve, windowsTunSelfTestRetryDelayMs))
+      diagnostics = await getWindowsTunDiagnostics({ includeSelfTest: true })
+    }
+
     if (!hasBlockingWindowsTunDiagnostics(diagnostics)) return
 
     if (offerRepair) {
-      diagnostics = await repairWindowsTunEnvironment(diagnostics)
+      diagnostics = await repairWindowsTunEnvironment(diagnostics, { interactive: false })
       if (!hasBlockingWindowsTunDiagnostics(diagnostics)) return
     }
 
@@ -887,8 +1026,8 @@ for ($pass = 0; $pass -lt 4; $pass++) {
       $instanceIds += $matches[1].Trim()
     }
   }
-  Get-PnpDevice -ErrorAction SilentlyContinue |
-    Where-Object { $_.InstanceId -match "^SWD\\\\WINTUN\\\\" -and $_.Status -ne "OK" } |
+  Get-PnpDevice -PresentOnly:$false -Class Net -ErrorAction SilentlyContinue |
+    Where-Object { $_.InstanceId -match "^SWD\\\\WINTUN\\\\" } |
     ForEach-Object { $instanceIds += $_.InstanceId }
   $instanceIds = $instanceIds | Sort-Object -Unique
   if (-not $instanceIds -or $instanceIds.Count -eq 0) {
@@ -904,11 +1043,50 @@ for ($pass = 0; $pass -lt 4; $pass++) {
 Get-Service -Name NetSetupSvc,DsmSvc,DeviceInstall,NlaSvc,hns -ErrorAction SilentlyContinue |
   Where-Object { $_.Status -ne 'Running' } |
   Start-Service -ErrorAction SilentlyContinue
-$vmsmpInstanceIds = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
-  Where-Object { $_.InstanceId -match "^ROOT\\\\VMS_VSMP\\\\" -and $_.Status -ne "OK" } |
-  Select-Object -ExpandProperty InstanceId -Unique
+$networkBase = "Registry::HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}"
+Get-ChildItem $networkBase -ErrorAction SilentlyContinue |
+  Where-Object { $_.PSChildName -ne "Descriptions" } |
+  ForEach-Object {
+    $connectionKey = Join-Path $_.PSPath "Connection"
+    if (-not (Test-Path $connectionKey)) { return }
+
+    try {
+      $connection = Get-ItemProperty $connectionKey -ErrorAction Stop
+      $pnpInstanceId = $connection.PnPInstanceId
+      if (-not $pnpInstanceId -or $pnpInstanceId -notmatch "^SWD\\\\Wintun\\\\") { return }
+
+      $enumPath = "Registry::HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Enum\\$($pnpInstanceId -replace '\\\\', '\\\\')"
+      if (-not (Test-Path $enumPath)) {
+        Remove-Item -LiteralPath $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    } catch {
+      # ignore orphan network key cleanup failures
+    }
+  }
+Get-Service -Name Netman,netprofm -ErrorAction SilentlyContinue |
+  Where-Object { $_.Status -ne 'Running' } |
+  Start-Service -ErrorAction SilentlyContinue
+$vmsmpInstanceIds = @()
+Get-PnpDevice -PresentOnly:$false -Class Net -ErrorAction SilentlyContinue |
+  Where-Object { $_.InstanceId -match "^ROOT\\\\VMS_VSMP\\\\" } |
+  ForEach-Object { $vmsmpInstanceIds += $_.InstanceId }
+Get-CimInstance Win32_NetworkAdapter -ErrorAction SilentlyContinue |
+  Where-Object { $_.PNPDeviceID -match "^ROOT\\\\VMS_VSMP\\\\" } |
+  ForEach-Object { $vmsmpInstanceIds += $_.PNPDeviceID }
+$vmsmpInstanceIds = $vmsmpInstanceIds | Sort-Object -Unique
 foreach ($instanceId in $vmsmpInstanceIds) {
   pnputil.exe /restart-device "$instanceId" | Out-Null
+}
+$wintunInf = Get-ChildItem "$env:windir\\System32\\DriverStore\\FileRepository" -Directory -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -like "wintun.inf_*" } |
+  Sort-Object LastWriteTime -Descending |
+  ForEach-Object {
+    $candidate = Join-Path $_.FullName "wintun.inf"
+    if (Test-Path $candidate) { $candidate }
+  } |
+  Select-Object -First 1
+if ($wintunInf) {
+  pnputil.exe /add-driver "$wintunInf" /install | Out-Null
 }
 pnputil.exe /scan-devices | Out-Null
 Start-Sleep -Seconds 2
@@ -944,34 +1122,44 @@ async function runWindowsTunRepairScriptElevated(script: string): Promise<void> 
 }
 
 export async function repairWindowsTunEnvironment(
-  initialDiagnostics?: IWindowsTunDiagnostics
+  initialDiagnostics?: IWindowsTunDiagnostics,
+  options: {
+    interactive?: boolean
+  } = {}
 ): Promise<IWindowsTunDiagnostics> {
   if (process.platform !== 'win32') {
     return getWindowsTunDiagnostics()
   }
 
+  const { interactive = true } = options
   const diagnostics =
     initialDiagnostics || (await getWindowsTunDiagnostics({ includeSelfTest: true }))
   if (!hasBlockingWindowsTunDiagnostics(diagnostics)) {
     return diagnostics
   }
 
-  const confirmText = i18next.t('common.confirm') || '确认'
-  const cancelText = i18next.t('common.cancel') || '取消'
-  const choice = dialog.showMessageBoxSync({
-    type: 'warning',
-    title: i18next.t('tun.wintunRepair.confirmTitle') || '修复 Wintun 环境',
-    message:
-      i18next.t('tun.wintunRepair.confirmMessage') ||
-      '将删除异常 Wintun 虚拟网卡并尝试刷新 Windows 虚拟网络设备；不会停止 EasyTier/EasyTier-Core，继续？',
-    detail: formatWindowsTunDiagnostics(diagnostics),
-    buttons: [confirmText, cancelText],
-    defaultId: 0,
-    cancelId: 1
-  })
+  if (interactive) {
+    const confirmText = i18next.t('common.confirm') || '确认'
+    const cancelText = i18next.t('common.cancel') || '取消'
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: i18next.t('tun.wintunRepair.confirmTitle') || '修复 Wintun 环境',
+      message:
+        i18next.t('tun.wintunRepair.confirmMessage') ||
+        '将删除异常 Wintun 虚拟网卡并尝试刷新 Windows 虚拟网络设备；不会停止 EasyTier/EasyTier-Core，继续？',
+      detail: formatWindowsTunDiagnostics(diagnostics),
+      buttons: [confirmText, cancelText],
+      defaultId: 0,
+      cancelId: 1
+    })
 
-  if (choice !== 0) {
-    return diagnostics
+    if (choice !== 0) {
+      return diagnostics
+    }
+  } else {
+    managerLogger.warn(
+      `Auto repairing Windows TUN environment before enabling TUN: ${formatWindowsTunDiagnostics(diagnostics)}`
+    )
   }
 
   await runWindowsTunRepairScriptElevated(createWindowsTunRepairScript())
@@ -1248,9 +1436,11 @@ function setupCoreListeners(
       return
     }
 
-    if (isRestarting) {
-      managerLogger.info('Core closed during restart, skipping auto-restart')
-      rejectStartup(new Error('Core startup was interrupted by restart'))
+    if (isRestarting || isStoppingCore) {
+      managerLogger.info('Core closed during controlled shutdown or restart, skipping auto-restart')
+      if (isRestarting) {
+        rejectStartup(new Error('Core startup was interrupted by restart'))
+      }
       return
     }
 
@@ -1438,20 +1628,25 @@ async function stopCoreInternal(force = false, cancelStartup = true): Promise<vo
     }
   }
 
-  stopCoreProcessAndStreams(cancelStartup)
+  await stopCoreProcessAndStreams(cancelStartup)
 
   await cleanupStoppedCoreResources()
 }
 
-function stopCoreProcessAndStreams(cancelStartup = true): void {
+async function stopCoreProcessAndStreams(cancelStartup = true): Promise<void> {
   if (cancelStartup) {
     cancelActiveStartup?.(new Error('Core startup was cancelled by a stop request'))
     cancelActiveStartup = null
   }
-  if (child) {
-    child.removeAllListeners()
-    child.kill('SIGINT')
+  const proc = child
+  if (proc) {
     child = null
+    isStoppingCore = true
+    try {
+      await terminateTrackedCoreProcess(proc)
+    } finally {
+      isStoppingCore = false
+    }
   }
 
   stopCoreProcessWatchdog()
@@ -1483,7 +1678,7 @@ export async function stopCore(force = false): Promise<void> {
 export async function stopCoreForExit(): Promise<void> {
   coreOperationPhase = 'shutting-down'
   cancelAutomaticRestart()
-  stopCoreProcessAndStreams()
+  await stopCoreProcessAndStreams()
   await Promise.allSettled([
     recoverDNS({ force: true, timeout: 750 }),
     cleanupStoppedCoreResources()

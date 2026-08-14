@@ -3,14 +3,13 @@ import { mainWindow, triggerMainWindow } from '../window'
 import {
   getAppConfig,
   getControledMihomoConfig,
-  patchAppConfig,
   patchControledMihomoConfig
 } from '../config'
-import { triggerSysProxy } from '../sys/sysproxy'
+import { setSysProxyEnabled } from '../sys/sysproxy'
 import { quitWithoutCore, setTunMode } from '../core/manager'
 import i18next from '../../shared/i18n'
 import { floatingWindow, triggerFloatingWindow } from './floatingWindow'
-import { copyEnv, updateTrayIcon } from './tray'
+import { copyEnv, refreshTrayUi, updateTrayIcon } from './tray'
 
 export async function registerShortcut(
   oldShortcut: string,
@@ -37,46 +36,47 @@ export async function registerShortcut(
     case 'triggerSysProxyShortcut': {
       return globalShortcut.register(newShortcut, async () => {
         const {
-          sysProxy: { enable }
+          sysProxy: { enable: previousEnable }
         } = await getAppConfig()
+        const targetEnable = !previousEnable
+        let succeeded = false
+
         try {
-          await triggerSysProxy(!enable)
-          await patchAppConfig({ sysProxy: { enable: !enable } })
+          succeeded = await setSysProxyEnabled(targetEnable)
+          if (!succeeded) return
           new Notification({
             title: i18next.t(
-              !enable
+              targetEnable
                 ? 'common.notification.systemProxyEnabled'
                 : 'common.notification.systemProxyDisabled'
             )
           }).show()
+        } catch {
+          // setSysProxyEnabled performs configuration and native-state rollback.
+        } finally {
           mainWindow?.webContents.send('appConfigUpdated')
           floatingWindow?.webContents.send('appConfigUpdated')
-        } catch {
-          // ignore
-        } finally {
-          ipcMain.emit('updateTrayMenu')
-          await updateTrayIcon()
+          await refreshTrayUi()
         }
       })
     }
     case 'triggerTunShortcut': {
       return globalShortcut.register(newShortcut, async () => {
         const { tun } = await getControledMihomoConfig()
-        const enable = tun?.enable ?? false
+        const targetEnable = !(tun?.enable ?? false)
         try {
-          await setTunMode(!enable)
+          await setTunMode(targetEnable)
           new Notification({
             title: i18next.t(
-              !enable ? 'common.notification.tunEnabled' : 'common.notification.tunDisabled'
+              targetEnable ? 'common.notification.tunEnabled' : 'common.notification.tunDisabled'
             )
           }).show()
+        } catch {
+          // setTunMode performs its own config/core rollback.
+        } finally {
           mainWindow?.webContents.send('controledMihomoConfigUpdated')
           floatingWindow?.webContents.send('controledMihomoConfigUpdated')
-        } catch {
-          // ignore
-        } finally {
-          ipcMain.emit('updateTrayMenu')
-          await updateTrayIcon()
+          await refreshTrayUi()
         }
       })
     }

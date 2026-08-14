@@ -102,6 +102,8 @@ const validInvokeChannels = [
   'quitWithoutCore',
   // System
   'triggerSysProxy',
+  'setSysProxyEnabled',
+  'patchSysProxyConfig',
   'checkTunPermissions',
   'grantTunPermissions',
   'manualGrantCorePermition',

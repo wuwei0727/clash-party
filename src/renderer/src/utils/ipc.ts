@@ -171,6 +171,8 @@ interface IpcApi {
   quitWithoutCore: () => Promise<void>
   // System
   triggerSysProxy: (enable: boolean) => Promise<void>
+  setSysProxyEnabled: (enable: boolean) => Promise<boolean>
+  patchSysProxyConfig: (patch: Partial<ISysProxyConfig>) => Promise<boolean>
   checkTunPermissions: () => Promise<boolean>
   grantTunPermissions: () => Promise<void>
   manualGrantCorePermition: () => Promise<void>
@@ -375,6 +377,8 @@ export const {
   quitWithoutCore,
   // System
   triggerSysProxy,
+  setSysProxyEnabled,
+  patchSysProxyConfig,
   checkTunPermissions,
   grantTunPermissions,
   manualGrantCorePermition,

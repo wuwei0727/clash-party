@@ -81,7 +81,7 @@ import {
   getWindowsTunDiagnostics,
   repairWindowsTunEnvironment
 } from '../core/manager'
-import { triggerSysProxy } from '../sys/sysproxy'
+import { patchSysProxyConfig, setSysProxyEnabled, triggerSysProxy } from '../sys/sysproxy'
 import { checkUpdate, downloadAndInstallUpdate } from '../resolve/autoUpdater'
 import {
   getFilePath,
@@ -304,6 +304,8 @@ const asyncHandlers: Record<string, AsyncFn> = {
   quitWithoutCore,
   // System
   triggerSysProxy,
+  setSysProxyEnabled,
+  patchSysProxyConfig,
   checkTunPermissions,
   grantTunPermissions,
   manualGrantCorePermition,

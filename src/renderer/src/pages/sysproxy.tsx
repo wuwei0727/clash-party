@@ -6,9 +6,9 @@ import SettingItem from '@renderer/components/base/base-setting-item'
 import PacEditorModal from '@renderer/components/sysproxy/pac-editor-modal'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
 import { platform } from '@renderer/utils/init'
-import { openUWPTool, triggerSysProxy } from '@renderer/utils/ipc'
+import { openUWPTool, patchSysProxyConfig } from '@renderer/utils/ipc'
 import { sysProxyBypassValidator } from '@renderer/utils/validate'
-import React, { Key, useState } from 'react'
+import React, { Key, useEffect, useState } from 'react'
 import { MdDeleteForever } from 'react-icons/md'
 import { useTranslation } from 'react-i18next'
 
@@ -19,48 +19,52 @@ function FindProxyForURL(url, host) {
 `
 
 const Sysproxy: React.FC = () => {
-  const defaultBypass: string[] =
-    platform === 'linux'
-      ? ['localhost', '127.0.0.1', '192.168.0.0/16', '10.0.0.0/8', '172.16.0.0/12', '::1']
-      : platform === 'darwin'
-        ? [
-            '127.0.0.1',
-            '192.168.0.0/16',
-            '10.0.0.0/8',
-            '172.16.0.0/12',
-            'localhost',
-            '*.local',
-            '*.crashlytics.com',
-            '<local>'
-          ]
-        : [
-            'localhost',
-            '127.*',
-            '192.168.*',
-            '10.*',
-            '172.16.*',
-            '172.17.*',
-            '172.18.*',
-            '172.19.*',
-            '172.20.*',
-            '172.21.*',
-            '172.22.*',
-            '172.23.*',
-            '172.24.*',
-            '172.25.*',
-            '172.26.*',
-            '172.27.*',
-            '172.28.*',
-            '172.29.*',
-            '172.30.*',
-            '172.31.*',
-            '<local>'
-          ]
+  const defaultBypass: string[] = React.useMemo(
+    () =>
+      platform === 'linux'
+        ? ['localhost', '127.0.0.1', '192.168.0.0/16', '10.0.0.0/8', '172.16.0.0/12', '::1']
+        : platform === 'darwin'
+          ? [
+              '127.0.0.1',
+              '192.168.0.0/16',
+              '10.0.0.0/8',
+              '172.16.0.0/12',
+              'localhost',
+              '*.local',
+              '*.crashlytics.com',
+              '<local>'
+            ]
+          : [
+              'localhost',
+              '127.*',
+              '192.168.*',
+              '10.*',
+              '172.16.*',
+              '172.17.*',
+              '172.18.*',
+              '172.19.*',
+              '172.20.*',
+              '172.21.*',
+              '172.22.*',
+              '172.23.*',
+              '172.24.*',
+              '172.25.*',
+              '172.26.*',
+              '172.27.*',
+              '172.28.*',
+              '172.29.*',
+              '172.30.*',
+              '172.31.*',
+              '<local>'
+            ],
+    []
+  )
 
   const { t } = useTranslation()
-  const { appConfig, patchAppConfig } = useAppConfig()
+  const { appConfig, mutateAppConfig } = useAppConfig()
   const { sysProxy } = appConfig || ({ sysProxy: { enable: false } } as IAppConfig)
   const [changed, setChanged] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [values, originSetValues] = useState({
     enable: sysProxy.enable,
     host: sysProxy.host ?? '',
@@ -69,7 +73,20 @@ const Sysproxy: React.FC = () => {
     pacScript: sysProxy.pacScript ?? defaultPacScript
   })
 
+  useEffect(() => {
+    if (changed || saving) return
+    originSetValues((current) => ({
+      ...current,
+      enable: sysProxy.enable,
+      host: sysProxy.host ?? '',
+      bypass: sysProxy.bypass ?? defaultBypass,
+      mode: sysProxy.mode ?? 'manual',
+      pacScript: sysProxy.pacScript ?? defaultPacScript
+    }))
+  }, [changed, saving, sysProxy, defaultBypass])
+
   const setValues = (v: typeof values): void => {
+    if (saving) return
     originSetValues(v)
     setChanged(true)
   }
@@ -107,29 +124,40 @@ const Sysproxy: React.FC = () => {
   }
 
   const onSave = async (): Promise<void> => {
-    setChanged(false)
+    if (saving || !changed) return
 
-    // 保存当前的开关状态，以便在失败时恢复
-    const previousState = values.enable
-    const sysProxyPatch: ISysProxyConfig = { ...values }
+    setSaving(true)
+
+    const sysProxyPatch: Partial<ISysProxyConfig> = {
+      host: values.host,
+      mode: values.mode,
+      pacScript: values.pacScript
+    }
     if (hasInvalidBypass) {
       // 存在非法条目时不覆盖已保存的绕过列表，其它系统代理设置照常保存
-      delete sysProxyPatch.bypass
+      // Keep the previous bypass list by omitting it from the patch.
     } else {
       sysProxyPatch.bypass = normalizedBypass
     }
 
     try {
-      await patchAppConfig({ sysProxy: sysProxyPatch })
-      await triggerSysProxy(true)
-
-      await patchAppConfig({ sysProxy: { enable: true } })
-    } catch (e) {
-      setValues({ ...values, enable: previousState })
+      const applied = await patchSysProxyConfig(sysProxyPatch)
+      if (!applied) {
+        await mutateAppConfig()
+        return
+      }
+      await mutateAppConfig()
+      setChanged(false)
+    } catch (error) {
       setChanged(true)
-      showErrorSync(e, t('common.error.sysproxySetupFailed'))
-
-      await patchAppConfig({ sysProxy: { enable: false } })
+      try {
+        await mutateAppConfig()
+      } catch {
+        // Preserve the save error even if the config refresh also fails.
+      }
+      showErrorSync(error, t('common.error.sysproxySetupFailed'))
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -138,7 +166,13 @@ const Sysproxy: React.FC = () => {
       title={t('sysproxy.title')}
       header={
         changed && (
-          <Button color="primary" className="app-nodrag" size="sm" onPress={onSave}>
+          <Button
+            color="primary"
+            className="app-nodrag"
+            size="sm"
+            onPress={onSave}
+            isDisabled={saving}
+          >
             {t('common.save')}
           </Button>
         )
@@ -160,6 +194,7 @@ const Sysproxy: React.FC = () => {
             size="sm"
             className="w-[50%]"
             value={values.host}
+            isDisabled={saving}
             placeholder={t('sysproxy.host.placeholder')}
             onValueChange={(v) => {
               setValues({ ...values, host: v })
@@ -171,6 +206,7 @@ const Sysproxy: React.FC = () => {
             size="sm"
             color="primary"
             selectedKey={values.mode}
+            isDisabled={saving}
             onSelectionChange={(key: Key) => setValues({ ...values, mode: key as SysProxyMode })}
           >
             <Tab key="manual" title={t('sysproxy.mode.manual')} />
@@ -181,6 +217,7 @@ const Sysproxy: React.FC = () => {
           <SettingItem title={t('sysproxy.uwp.title')} divider>
             <Button
               size="sm"
+              isDisabled={saving}
               onPress={async () => {
                 await openUWPTool()
               }}
@@ -192,7 +229,12 @@ const Sysproxy: React.FC = () => {
 
         {values.mode === 'auto' && (
           <SettingItem title={t('sysproxy.mode.title')}>
-            <Button size="sm" onPress={() => setOpenPacEditor(true)} variant="bordered">
+            <Button
+              size="sm"
+              onPress={() => setOpenPacEditor(true)}
+              variant="bordered"
+              isDisabled={saving}
+            >
               {t('sysproxy.pac.edit')}
             </Button>
           </SettingItem>
@@ -202,6 +244,7 @@ const Sysproxy: React.FC = () => {
             <SettingItem title={t('sysproxy.bypass.addDefault')} divider>
               <Button
                 size="sm"
+                isDisabled={saving}
                 onPress={() => {
                   setValues({ ...values, bypass: defaultBypass.concat(values.bypass) })
                 }}
@@ -218,6 +261,7 @@ const Sysproxy: React.FC = () => {
                     size="sm"
                     placeholder={t('sysproxy.bypass.placeholder', { example: bypassExample })}
                     value={domain}
+                    isDisabled={saving}
                     isInvalid={Boolean(getBypassError(domain))}
                     errorMessage={getBypassError(domain)}
                     onValueChange={(v) => handleBypassChange(v, index)}
@@ -228,6 +272,7 @@ const Sysproxy: React.FC = () => {
                       size="sm"
                       variant="flat"
                       color="warning"
+                      isDisabled={saving}
                       onPress={() => handleBypassChange('', index)}
                     >
                       <MdDeleteForever className="text-lg" />

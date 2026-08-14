@@ -39,7 +39,7 @@ import {
   mihomoHotReloadConfig,
   restartCore,
   startSubStoreBackendServer,
-  triggerSysProxy,
+  patchSysProxyConfig,
   fetchMihomoTags,
   installSpecificMihomoCore,
   clearMihomoVersionCache,
@@ -94,7 +94,7 @@ const DEFAULT_WEBUI_PANEL_URL = WEBUI_PANEL_OPTIONS[0].url
 
 const Mihomo: React.FC = () => {
   const { t } = useTranslation()
-  const { appConfig, patchAppConfig } = useAppConfig()
+  const { appConfig, patchAppConfig, mutateAppConfig } = useAppConfig()
   const {
     core = 'mihomo',
     specificVersion,
@@ -107,7 +107,6 @@ const Mihomo: React.FC = () => {
     maxLogDays = 7,
     maxLogFileSize = 10,
     disableCoreLog = false,
-    sysProxy,
     showMixedPort,
     enableMixedPort = true,
     showSocksPort,
@@ -623,8 +622,26 @@ const Mihomo: React.FC = () => {
                   onPress={async () => {
                     await onChangeNeedRestart({ 'mixed-port': mixedPortInput })
                     await startSubStoreBackendServer()
-                    if (sysProxy?.enable) {
-                      triggerSysProxy(true)
+                    try {
+                      const applied = await patchSysProxyConfig({})
+                      if (!applied) {
+                        try {
+                          await mutateAppConfig()
+                        } catch {
+                          // Keep the canonical refresh best-effort for a superseded request.
+                        }
+                        window.electron.ipcRenderer.send('updateFloatingWindow')
+                        window.electron.ipcRenderer.send('updateTrayMenu')
+                      }
+                    } catch (error) {
+                      try {
+                        await mutateAppConfig()
+                      } catch {
+                        // Preserve the native proxy error if refreshing the UI fails.
+                      }
+                      window.electron.ipcRenderer.send('updateFloatingWindow')
+                      window.electron.ipcRenderer.send('updateTrayMenu')
+                      await showError(error, t('common.error.sysproxySetupFailed'))
                     }
                   }}
                 >

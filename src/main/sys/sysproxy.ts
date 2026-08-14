@@ -2,10 +2,10 @@ import { promisify } from 'util'
 import { exec, execFile } from 'child_process'
 import fs from 'fs'
 import path from 'path'
-import { triggerAutoProxy, triggerManualProxy } from 'sysproxy-rs'
+import { getAutoProxy, getSystemProxy, triggerAutoProxy, triggerManualProxy } from 'sysproxy-rs'
 import { net } from 'electron'
 import axios from 'axios'
-import { getAppConfig, getControledMihomoConfig } from '../config'
+import { getAppConfig, getControledMihomoConfig, patchAppConfig } from '../config'
 import { DEFAULT_MIHOMO_PORTS } from '../../shared/appConfig'
 import { pacPort, startPacServer, stopPacServer } from '../resolve/server'
 import { proxyLogger } from '../utils/logger'
@@ -13,7 +13,7 @@ import { resourcesFilesDir } from '../utils/dirs'
 
 let triggerSysProxyTimer: NodeJS.Timeout | null = null
 let triggerSysProxyQueue: Promise<void> = Promise.resolve()
-let triggerSysProxySequence = 0
+let triggerSysProxyGeneration = 0
 const helperSocketPath = '/tmp/mihomo-party-helper.sock'
 const helperPath = '/Library/PrivilegedHelperTools/party.mihomo.helper'
 const helperPlistPath = '/Library/LaunchDaemons/party.mihomo.helper.plist'
@@ -74,40 +74,240 @@ function helperAxiosOptions(helperTimeout?: number): { socketPath: string; timeo
     : { socketPath: helperSocketPath, timeout: helperTimeout }
 }
 
-export async function triggerSysProxy(
-  enable: boolean,
-  options: TriggerSysProxyOptions = {}
-): Promise<void> {
-  const sequence = ++triggerSysProxySequence
-
+function beginSysProxyRequest(): number {
+  triggerSysProxyGeneration += 1
   if (triggerSysProxyTimer) {
     clearTimeout(triggerSysProxyTimer)
     triggerSysProxyTimer = null
   }
+  return triggerSysProxyGeneration
+}
 
-  const operation = triggerSysProxyQueue.then(async () => {
-    if (net.isOnline() || options.force) {
-      if (enable) {
-        await disableSysProxy(options.helperTimeout)
-        await enableSysProxy(options.helperTimeout)
-      } else {
-        await disableSysProxy(options.helperTimeout)
-      }
-      return
+function isCurrentSysProxyRequest(generation: number): boolean {
+  return generation === triggerSysProxyGeneration
+}
+
+function enqueueSysProxyOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const queuedOperation = triggerSysProxyQueue.then(operation, operation)
+  // Keep later system-proxy operations running after a failed operation.
+  triggerSysProxyQueue = queuedOperation.then(
+    () => undefined,
+    () => undefined
+  )
+  return queuedOperation
+}
+
+async function waitForLatestSysProxyQueue(): Promise<void> {
+  while (true) {
+    const queue = triggerSysProxyQueue
+    await queue
+    if (queue === triggerSysProxyQueue) return
+  }
+}
+
+function cloneSysProxyConfig(config: ISysProxyConfig): ISysProxyConfig {
+  return {
+    ...config,
+    bypass: config.bypass ? [...config.bypass] : undefined
+  }
+}
+
+function readNativeSysProxyEnabled(): boolean | null {
+  try {
+    const manualProxy = getSystemProxy()
+    const autoProxy = getAutoProxy()
+    return manualProxy.enable || autoProxy.enable
+  } catch {
+    return null
+  }
+}
+
+async function syncConfigToNativeSysProxy(): Promise<void> {
+  const nativeEnabled = readNativeSysProxyEnabled()
+  if (nativeEnabled === null) return
+
+  try {
+    await patchAppConfig({ sysProxy: { enable: nativeEnabled } })
+  } catch (error) {
+    await proxyLogger.warn('Failed to synchronize system proxy config with native state', error)
+  }
+}
+
+function verifyNativeSysProxyState(enable: boolean, generation: number): void {
+  if (!isCurrentSysProxyRequest(generation)) return
+
+  const nativeEnabled = readNativeSysProxyEnabled()
+  if (nativeEnabled !== null && nativeEnabled !== enable) {
+    throw new Error('Native system proxy state did not match the requested state')
+  }
+}
+
+async function rollbackSysProxyState(
+  previousConfig: ISysProxyConfig,
+  generation: number,
+  restoreNativeState: boolean
+): Promise<void> {
+  const restoreConfig = async (): Promise<boolean> => {
+    if (!isCurrentSysProxyRequest(generation)) return false
+
+    try {
+      await patchAppConfig({ sysProxy: previousConfig })
+      return isCurrentSysProxyRequest(generation)
+    } catch (error) {
+      await proxyLogger.warn('Failed to rollback system proxy config', error)
+      return false
+    }
+  }
+
+  let configRestored = await restoreConfig()
+  let nativeRestored = !restoreNativeState
+
+  if (restoreNativeState && configRestored && isCurrentSysProxyRequest(generation)) {
+    try {
+      await triggerSysProxyInternal(previousConfig.enable, generation)
+      if (!isCurrentSysProxyRequest(generation)) return
+      nativeRestored = true
+    } catch (error) {
+      await proxyLogger.warn('Failed to rollback native system proxy state', error)
+    }
+  }
+
+  if ((!configRestored || !nativeRestored) && isCurrentSysProxyRequest(generation)) {
+    if (!configRestored) {
+      configRestored = await restoreConfig()
     }
 
-    if (sequence !== triggerSysProxySequence) return
-    triggerSysProxyTimer = setTimeout(() => {
-      triggerSysProxyTimer = null
-      if (sequence !== triggerSysProxySequence) return
-      void triggerSysProxy(enable, options).catch((error) => {
-        void proxyLogger.error('Failed to retry system proxy', error)
-      })
-    }, 5000)
+    if (
+      restoreNativeState &&
+      configRestored &&
+      !nativeRestored &&
+      isCurrentSysProxyRequest(generation)
+    ) {
+      try {
+        await triggerSysProxyInternal(previousConfig.enable, generation)
+        if (!isCurrentSysProxyRequest(generation)) return
+        nativeRestored = true
+      } catch (error) {
+        await proxyLogger.warn('Failed to retry native system proxy rollback', error)
+      }
+    }
+  }
+
+  if ((!configRestored || !nativeRestored) && isCurrentSysProxyRequest(generation)) {
+    await proxyLogger.warn('System proxy rollback remained incomplete; synchronizing enable state')
+    await syncConfigToNativeSysProxy()
+  }
+}
+
+export async function triggerSysProxy(
+  enable: boolean,
+  options: TriggerSysProxyOptions = {}
+): Promise<void> {
+  const generation = beginSysProxyRequest()
+  await enqueueSysProxyOperation(async () => {
+    try {
+      await triggerSysProxyInternal(enable, generation, options)
+    } catch (error) {
+      if (isCurrentSysProxyRequest(generation)) {
+        await syncConfigToNativeSysProxy()
+      }
+      throw error
+    }
+  })
+}
+
+export async function setSysProxyEnabled(enable: boolean): Promise<boolean> {
+  const generation = beginSysProxyRequest()
+
+  const applied = await enqueueSysProxyOperation(async () => {
+    if (!isCurrentSysProxyRequest(generation)) return false
+
+    const currentConfig = await getAppConfig()
+    const previousConfig = cloneSysProxyConfig(currentConfig.sysProxy)
+    let nativeStateAttempted = false
+
+    try {
+      await patchAppConfig({ sysProxy: { enable } })
+      if (!isCurrentSysProxyRequest(generation)) return false
+
+      nativeStateAttempted = true
+      await triggerSysProxyInternal(enable, generation)
+      if (!isCurrentSysProxyRequest(generation)) return false
+      return true
+    } catch (error) {
+      // A newer request owns the final state and will apply its own target.
+      if (!isCurrentSysProxyRequest(generation)) return false
+
+      await rollbackSysProxyState(previousConfig, generation, nativeStateAttempted)
+      throw error
+    }
   })
 
-  triggerSysProxyQueue = operation.catch(() => {})
-  return operation
+  if (!applied) await waitForLatestSysProxyQueue()
+  return applied
+}
+
+export async function patchSysProxyConfig(patch: Partial<ISysProxyConfig>): Promise<boolean> {
+  const generation = beginSysProxyRequest()
+
+  const applied = await enqueueSysProxyOperation(async () => {
+    if (!isCurrentSysProxyRequest(generation)) return false
+
+    const currentConfig = await getAppConfig()
+    const previousConfig = cloneSysProxyConfig(currentConfig.sysProxy)
+    const nextSysProxy: ISysProxyConfig = {
+      ...currentConfig.sysProxy,
+      ...patch,
+      enable: currentConfig.sysProxy.enable
+    }
+
+    try {
+      await patchAppConfig({ sysProxy: nextSysProxy })
+      if (!isCurrentSysProxyRequest(generation)) return false
+
+      await triggerSysProxyInternal(nextSysProxy.enable, generation)
+      return isCurrentSysProxyRequest(generation)
+    } catch (error) {
+      // A concurrent enable/disable request will apply the newest target and parameters.
+      if (!isCurrentSysProxyRequest(generation)) return false
+
+      await rollbackSysProxyState(previousConfig, generation, true)
+      throw error
+    }
+  })
+
+  if (!applied) await waitForLatestSysProxyQueue()
+  return applied
+}
+
+async function triggerSysProxyInternal(
+  enable: boolean,
+  generation: number,
+  options: TriggerSysProxyOptions = {}
+): Promise<void> {
+  if (!isCurrentSysProxyRequest(generation)) return
+
+  if (net.isOnline() || options.force) {
+    if (enable) {
+      await disableSysProxy(options.helperTimeout)
+      if (!isCurrentSysProxyRequest(generation)) return
+      await enableSysProxy(options.helperTimeout)
+    } else {
+      await disableSysProxy(options.helperTimeout)
+    }
+
+    if (!isCurrentSysProxyRequest(generation)) return
+    verifyNativeSysProxyState(enable, generation)
+  } else {
+    if (triggerSysProxyTimer) clearTimeout(triggerSysProxyTimer)
+    triggerSysProxyTimer = setTimeout(() => {
+      triggerSysProxyTimer = null
+      if (!isCurrentSysProxyRequest(generation)) return
+      void triggerSysProxy(enable, options).catch((error) => {
+        void proxyLogger.warn('Failed to retry system proxy operation', error)
+      })
+    }, 5000)
+  }
 }
 
 async function enableSysProxy(helperTimeout?: number): Promise<void> {
@@ -214,7 +414,7 @@ async function isHelperServiceRegistered(): Promise<boolean> {
 }
 
 function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`
+  return `'${value.replace(/'/g, `\'"'"'`)}'`
 }
 
 async function startHelperService(forceRepair = false): Promise<void> {

@@ -12,7 +12,7 @@ const { Provider, useConfig } = createConfigContext<IAppConfig>({
 
 interface AppConfigContextType {
   appConfig: IAppConfig | undefined
-  mutateAppConfig: () => void
+  mutateAppConfig: () => Promise<unknown>
   patchAppConfig: (value: Partial<IAppConfig>) => Promise<void>
 }
 
@@ -34,6 +34,7 @@ const AppConfigContextWrapper: React.FC<{ children: ReactNode }> = ({ children }
         await patch(value)
       } catch (e) {
         await showError(e, t('common.error.updateAppConfigFailed'))
+        throw e
       } finally {
         mutate()
       }

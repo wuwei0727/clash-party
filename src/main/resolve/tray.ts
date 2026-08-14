@@ -7,7 +7,6 @@ import {
   getAppConfig,
   getControledMihomoConfig,
   getProfileConfig,
-  patchAppConfig,
   patchControledMihomoConfig
 } from '../config'
 import icoIcon from '../../../resources/icon.ico?asset'
@@ -31,7 +30,7 @@ import {
 } from '../core/mihomoApi'
 import { mainWindow, showMainWindow, triggerMainWindow } from '../window'
 import { dataDir, logDir, mihomoCoreDir, mihomoWorkDir } from '../utils/dirs'
-import { triggerSysProxy } from '../sys/sysproxy'
+import { setSysProxyEnabled } from '../sys/sysproxy'
 import {
   quitWithoutCore,
   checkMihomoCorePermissions,
@@ -47,6 +46,10 @@ export let tray: Tray | null = null
 let trayMenu: Menu | null = null
 // macOS 流量显示状态，避免异步读取配置导致的时序问题
 let macTrafficIconEnabled = false
+// 递增序号保证旧的异步图标请求不能覆盖最新状态
+let trayIconUpdateGeneration = 0
+// 所有托盘菜单和图标刷新共用一个队列，避免旧菜单/图标最后写回
+let trayUiRefreshQueue: Promise<void> = Promise.resolve()
 type TrayIconStatus = 'white' | 'blue' | 'green' | 'red'
 type TrayImage = Electron.NativeImage | string
 const customTrayIconSize = 16
@@ -56,11 +59,21 @@ function getActiveTray(): Tray | null {
   if (!tray) return null
 
   if (tray.isDestroyed()) {
+    trayIconUpdateGeneration += 1
     tray = null
     return null
   }
 
   return tray
+}
+
+function beginTrayIconUpdate(): number {
+  trayIconUpdateGeneration += 1
+  return trayIconUpdateGeneration
+}
+
+function isCurrentTrayIconUpdate(generation: number): boolean {
+  return generation === trayIconUpdateGeneration && Boolean(getActiveTray())
 }
 
 function runTrayAction(actionName: string, action: () => void | Promise<void>): void {
@@ -86,17 +99,31 @@ function sendToWindow(
   }
 }
 
-async function refreshTrayUi(): Promise<void> {
-  await updateTrayMenu()
-  await updateTrayIcon()
+function enqueueTrayUiRefresh(action: () => Promise<void>): Promise<void> {
+  const queuedRefresh = trayUiRefreshQueue.then(action, action)
+  trayUiRefreshQueue = queuedRefresh.catch(async (error) => {
+    await trayLogger.error('Failed to refresh tray UI', error)
+  })
+  return queuedRefresh
 }
 
-async function refreshTrayUiWithState(
+export async function refreshTrayUi(): Promise<void> {
+  const generation = beginTrayIconUpdate()
+  await enqueueTrayUiRefresh(async () => {
+    await updateTrayMenu()
+    await updateTrayIconInternal(generation)
+  })
+}
+
+export async function refreshTrayUiWithState(
   sysProxyEnabled: boolean,
   tunEnabled: boolean
 ): Promise<void> {
-  await updateTrayMenu()
-  await updateTrayIconWithState(sysProxyEnabled, tunEnabled)
+  const generation = beginTrayIconUpdate()
+  await enqueueTrayUiRefresh(async () => {
+    await updateTrayMenu()
+    await updateTrayIconWithState(sysProxyEnabled, tunEnabled, generation)
+  })
 }
 
 export const buildContextMenu = async (): Promise<Menu> => {
@@ -286,26 +313,23 @@ export const buildContextMenu = async (): Promise<Menu> => {
       click: (item): void => {
         const enable = item.checked
         const previousEnable = !enable
-        const tunEnabled = effectiveTunEnabled
         runTrayAction('toggle system proxy from tray', async () => {
           try {
-            await updateTrayIconWithState(enable, tunEnabled)
-            await patchAppConfig({ sysProxy: { enable } })
-            await triggerSysProxy(enable)
+            const applied = await setSysProxyEnabled(enable)
+            if (!applied) {
+              sendToWindow(mainWindow, 'appConfigUpdated')
+              sendToWindow(floatingWindow, 'appConfigUpdated')
+              await refreshTrayUi()
+              return
+            }
             sendToWindow(mainWindow, 'appConfigUpdated')
             sendToWindow(floatingWindow, 'appConfigUpdated')
-            await refreshTrayUiWithState(enable, tunEnabled)
+            await refreshTrayUi()
           } catch (error) {
             item.checked = previousEnable
-            try {
-              await patchAppConfig({ sysProxy: { enable: previousEnable } })
-            } catch (rollbackError) {
-              await trayLogger.warn(
-                'Failed to rollback system proxy config from tray',
-                rollbackError
-              )
-            }
-            await updateTrayIconWithState(previousEnable, tunEnabled)
+            sendToWindow(mainWindow, 'appConfigUpdated')
+            sendToWindow(floatingWindow, 'appConfigUpdated')
+            await refreshTrayUi()
             await trayLogger.error('Failed to toggle system proxy from tray', error)
           }
         })
@@ -319,7 +343,6 @@ export const buildContextMenu = async (): Promise<Menu> => {
       click: (item): void => {
         const enable = item.checked
         const previousEnable = !enable
-        const sysProxyEnabled = sysProxy.enable
         runTrayAction('toggle TUN from tray', async () => {
           try {
             if (enable) {
@@ -335,7 +358,7 @@ export const buildContextMenu = async (): Promise<Menu> => {
                     } catch (error) {
                       await trayLogger.error('Failed to restart as admin from tray', error)
                       item.checked = previousEnable
-                      await refreshTrayUiWithState(sysProxyEnabled, previousEnable)
+                      await refreshTrayUi()
                       return
                     }
                   } else {
@@ -344,7 +367,7 @@ export const buildContextMenu = async (): Promise<Menu> => {
                     } catch (error) {
                       await trayLogger.error('Failed to grant TUN permissions from tray', error)
                       item.checked = previousEnable
-                      await refreshTrayUiWithState(sysProxyEnabled, previousEnable)
+                      await refreshTrayUi()
                       return
                     }
                   }
@@ -352,7 +375,7 @@ export const buildContextMenu = async (): Promise<Menu> => {
               } catch (error) {
                 await trayLogger.warn('Permission check failed in tray', error)
                 item.checked = previousEnable
-                await refreshTrayUiWithState(sysProxyEnabled, previousEnable)
+                await refreshTrayUi()
                 return
               }
             }
@@ -360,7 +383,7 @@ export const buildContextMenu = async (): Promise<Menu> => {
             await setTunMode(enable)
             sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
             sendToWindow(floatingWindow, 'controledMihomoConfigUpdated')
-            await refreshTrayUiWithState(sysProxyEnabled, enable)
+            await refreshTrayUi()
           } catch (error) {
             item.checked = previousEnable
             sendToWindow(mainWindow, 'controledMihomoConfigUpdated')
@@ -515,7 +538,7 @@ export async function createTray(): Promise<void> {
   await updateTrayToolTip()
   tray?.setIgnoreDoubleClickEvents(true)
 
-  await updateTrayIcon()
+  await updateTrayIconInternal()
 
   if (process.platform === 'darwin') {
     if (!useDockIcon) {
@@ -524,18 +547,22 @@ export async function createTray(): Promise<void> {
     // 移除旧监听器防止累积
     ipcMain.removeAllListeners('trayIconUpdate')
     ipcMain.on('trayIconUpdate', async (_, png: string, enabled: boolean) => {
+      const generation = beginTrayIconUpdate()
       macTrafficIconEnabled = enabled
       const { customTrayIcon = '' } = await getAppConfig()
+      if (!isCurrentTrayIconUpdate(generation)) return
       const customIcon = createCustomTrayImage(customTrayIcon)
       if (customIcon) {
-        tray?.setImage(customIcon)
-        await updateTrayToolTip(undefined, undefined, true)
+        if (!isCurrentTrayIconUpdate(generation)) return
+        getActiveTray()?.setImage(customIcon)
+        await updateTrayToolTip(undefined, undefined, true, generation)
         return
       }
       const image = nativeImage.createFromDataURL(png).resize({ height: 16 })
       image.setTemplateImage(true)
-      tray?.setImage(image)
-      await updateTrayToolTip(undefined, undefined, false)
+      if (!isCurrentTrayIconUpdate(generation)) return
+      getActiveTray()?.setImage(image)
+      await updateTrayToolTip(undefined, undefined, false, generation)
     })
     // macOS 默认行为：左键显示窗口，右键显示菜单
     tray?.addListener('click', async () => {
@@ -581,9 +608,8 @@ export async function createTray(): Promise<void> {
 
   // 移除旧监听器防止累积。所有平台都需要响应配置变更后的托盘刷新。
   ipcMain.removeAllListeners('updateTrayMenu')
-  ipcMain.on('updateTrayMenu', async () => {
-    await updateTrayMenu()
-    await updateTrayIcon()
+  ipcMain.on('updateTrayMenu', () => {
+    void refreshTrayUi()
   })
 }
 
@@ -605,12 +631,14 @@ async function updateTrayMenu(): Promise<void> {
 }
 
 async function showTrayMenu(): Promise<void> {
-  await updateTrayMenu()
+  await enqueueTrayUiRefresh(async () => {
+    await updateTrayMenu()
 
-  const currentTray = getActiveTray()
-  if (!currentTray || !trayMenu) return
+    const currentTray = getActiveTray()
+    if (!currentTray || !trayMenu) return
 
-  currentTray.popUpContextMenu(trayMenu)
+    currentTray.popUpContextMenu(trayMenu)
+  })
 }
 
 export async function copyEnv(
@@ -655,6 +683,7 @@ export async function showTrayIcon(): Promise<void> {
 }
 
 export async function closeTrayIcon(): Promise<void> {
+  trayIconUpdateGeneration += 1
   const activeTray = getActiveTray()
   if (activeTray) {
     activeTray.destroy()
@@ -749,7 +778,8 @@ function createCustomTrayImage(customTrayIcon: string): TrayImage | null {
 async function updateTrayToolTip(
   sysProxyEnabled?: boolean,
   tunEnabled?: boolean,
-  customIconEnabled?: boolean
+  customIconEnabled?: boolean,
+  generation?: number
 ): Promise<void> {
   try {
     if (!getActiveTray()) return
@@ -758,6 +788,8 @@ async function updateTrayToolTip(
       getControledMihomoConfig(),
       getAppConfig()
     ])
+    if (generation !== undefined && !isCurrentTrayIconUpdate(generation)) return
+
     const sysProxy = sysProxyEnabled ?? appConfig.sysProxy.enable
     const tunStatus = tunEnabled ?? tun?.enable === true
     const isCustomIcon = customIconEnabled ?? Boolean(appConfig.customTrayIcon)
@@ -778,6 +810,7 @@ async function updateTrayToolTip(
       status.push(t('tray.tooltip.customIcon'))
     }
 
+    if (generation !== undefined && !isCurrentTrayIconUpdate(generation)) return
     getActiveTray()?.setToolTip(['Clash Party', ...status].join('\n'))
   } catch (error) {
     await trayLogger.warn('Failed to update tray tooltip', error)
@@ -801,27 +834,30 @@ function setTrayImage(iconPath: string): void {
 export function updateTrayIconImmediate(sysProxyEnabled: boolean, tunEnabled: boolean): void {
   if (!getActiveTray()) return
 
+  const generation = beginTrayIconUpdate()
   const status = calculateTrayIconStatus(sysProxyEnabled, tunEnabled)
   const iconPaths = getIconPaths()
 
   getAppConfig()
     .then(async ({ disableTrayIconColor = false, customTrayIcon = '' }) => {
-      if (!getActiveTray()) return
+      if (!isCurrentTrayIconUpdate(generation)) return
       try {
         const customIcon = createCustomTrayImage(customTrayIcon)
         if (customIcon) {
+          if (!isCurrentTrayIconUpdate(generation)) return
           getActiveTray()?.setImage(customIcon)
-          await updateTrayToolTip(sysProxyEnabled, tunEnabled, true)
+          await updateTrayToolTip(sysProxyEnabled, tunEnabled, true, generation)
           return
         }
         // macOS 流量显示开启时，由 trayIconUpdate 负责图标更新
         if (process.platform === 'darwin' && macTrafficIconEnabled) {
-          await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
+          await updateTrayToolTip(sysProxyEnabled, tunEnabled, false, generation)
           return
         }
+        if (!isCurrentTrayIconUpdate(generation)) return
         const iconPath = disableTrayIconColor ? iconPaths.white : iconPaths[status]
         setTrayImage(iconPath)
-        await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
+        await updateTrayToolTip(sysProxyEnabled, tunEnabled, false, generation)
       } catch (error) {
         await trayLogger.warn('Failed to update tray icon immediately', error)
       }
@@ -833,59 +869,73 @@ export function updateTrayIconImmediate(sysProxyEnabled: boolean, tunEnabled: bo
 
 async function updateTrayIconWithState(
   sysProxyEnabled: boolean,
-  tunEnabled: boolean
+  tunEnabled: boolean,
+  reservedGeneration?: number
 ): Promise<void> {
   if (!getActiveTray()) return
 
+  const generation = reservedGeneration ?? beginTrayIconUpdate()
   try {
     const { disableTrayIconColor = false, customTrayIcon = '' } = await getAppConfig()
+    if (!isCurrentTrayIconUpdate(generation)) return
     const status = calculateTrayIconStatus(sysProxyEnabled, tunEnabled)
     const iconPaths = getIconPaths()
 
     const customIcon = createCustomTrayImage(customTrayIcon)
     if (customIcon) {
+      if (!isCurrentTrayIconUpdate(generation)) return
       getActiveTray()?.setImage(customIcon)
-      await updateTrayToolTip(sysProxyEnabled, tunEnabled, true)
+      await updateTrayToolTip(sysProxyEnabled, tunEnabled, true, generation)
       return
     }
 
     // macOS 流量显示开启时，由 trayIconUpdate 负责图标更新
     if (process.platform === 'darwin' && macTrafficIconEnabled) {
-      await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
+      await updateTrayToolTip(sysProxyEnabled, tunEnabled, false, generation)
       return
     }
 
+    if (!isCurrentTrayIconUpdate(generation)) return
     const iconPath = disableTrayIconColor ? iconPaths.white : iconPaths[status]
     setTrayImage(iconPath)
-    await updateTrayToolTip(sysProxyEnabled, tunEnabled, false)
+    await updateTrayToolTip(sysProxyEnabled, tunEnabled, false, generation)
   } catch (error) {
     await trayLogger.warn('Failed to update tray icon with explicit state', error)
   }
 }
 
-export async function updateTrayIcon(): Promise<void> {
+async function updateTrayIconInternal(reservedGeneration?: number): Promise<void> {
   if (!getActiveTray()) return
 
+  const generation = reservedGeneration ?? beginTrayIconUpdate()
   try {
     const { disableTrayIconColor = false, customTrayIcon = '' } = await getAppConfig()
     const status = await getTrayIconStatus()
+    if (!isCurrentTrayIconUpdate(generation)) return
     const iconPaths = getIconPaths()
 
     const customIcon = createCustomTrayImage(customTrayIcon)
     if (customIcon) {
+      if (!isCurrentTrayIconUpdate(generation)) return
       getActiveTray()?.setImage(customIcon)
-      await updateTrayToolTip(undefined, undefined, true)
+      await updateTrayToolTip(undefined, undefined, true, generation)
       return
     }
     // macOS 流量显示开启时，由 trayIconUpdate 负责图标更新
     if (process.platform === 'darwin' && macTrafficIconEnabled) {
-      await updateTrayToolTip(undefined, undefined, false)
+      await updateTrayToolTip(undefined, undefined, false, generation)
       return
     }
+    if (!isCurrentTrayIconUpdate(generation)) return
     const iconPath = disableTrayIconColor ? iconPaths.white : iconPaths[status]
     setTrayImage(iconPath)
-    await updateTrayToolTip(undefined, undefined, false)
+    await updateTrayToolTip(undefined, undefined, false, generation)
   } catch (error) {
     await trayLogger.warn('Failed to update tray icon', error)
   }
+}
+
+export async function updateTrayIcon(): Promise<void> {
+  const generation = beginTrayIconUpdate()
+  await enqueueTrayUiRefresh(() => updateTrayIconInternal(generation))
 }

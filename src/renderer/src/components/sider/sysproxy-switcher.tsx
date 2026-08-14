@@ -3,7 +3,7 @@ import { toast } from '@renderer/components/base/toast'
 import BorderSwitch from '@renderer/components/base/border-switch'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useAppConfig } from '@renderer/hooks/use-app-config'
-import { triggerSysProxy, updateTrayIconImmediate } from '@renderer/utils/ipc'
+import { setSysProxyEnabled, updateTrayIcon, updateTrayIconImmediate } from '@renderer/utils/ipc'
 import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-config'
 import { AiOutlineGlobal } from 'react-icons/ai'
 import React from 'react'
@@ -21,11 +21,15 @@ const SysproxySwitcher: React.FC<Props> = (props) => {
   const location = useLocation()
   const navigate = useNavigate()
   const match = location.pathname.includes('/sysproxy')
-  const { appConfig, patchAppConfig } = useAppConfig()
+  const { appConfig, mutateAppConfig } = useAppConfig()
   const { controledMihomoConfig } = useControledMihomoConfig()
   const { sysProxy, sysproxyCardStatus = 'col-span-1', disableAnimations = false } = appConfig || {}
   const { tun } = controledMihomoConfig || {}
   const { enable } = sysProxy || {}
+  const [pendingEnable, setPendingEnable] = React.useState<boolean | null>(null)
+  const pendingEnableRef = React.useRef<boolean | null>(null)
+  const selected = pendingEnable ?? enable ?? false
+
   const {
     attributes,
     listeners,
@@ -37,24 +41,40 @@ const SysproxySwitcher: React.FC<Props> = (props) => {
     id: 'sysproxy'
   })
   const transform = tf ? { x: tf.x, y: tf.y, scaleX: 1, scaleY: 1 } : null
-  const onChange = async (enable: boolean): Promise<void> => {
-    const previousState = !enable
-    const tunEnabled = tun?.enable ?? false
 
-    // 立即更新图标
-    updateTrayIconImmediate(enable, tunEnabled)
+  const refreshAuthoritativeUi = async (): Promise<void> => {
+    try {
+      await mutateAppConfig()
+    } catch {
+      // The tray refresh below still reads the canonical main-process state.
+    }
+    window.electron.ipcRenderer.send('updateFloatingWindow')
+    try {
+      await updateTrayIcon()
+    } catch {
+      // Keep menu refresh and pending-state cleanup independent from icon errors.
+    }
+    window.electron.ipcRenderer.send('updateTrayMenu')
+  }
+
+  const onChange = async (nextEnable: boolean): Promise<void> => {
+    if (pendingEnableRef.current !== null) return
+
+    const tunEnabled = tun?.enable ?? false
+    pendingEnableRef.current = nextEnable
+    setPendingEnable(nextEnable)
+    updateTrayIconImmediate(nextEnable, tunEnabled)
 
     try {
-      await patchAppConfig({ sysProxy: { enable } })
-      await triggerSysProxy(enable)
-
-      window.electron.ipcRenderer.send('updateFloatingWindow')
-      window.electron.ipcRenderer.send('updateTrayMenu')
-    } catch (e) {
-      await patchAppConfig({ sysProxy: { enable: previousState } })
-      // 回滚图标
-      updateTrayIconImmediate(previousState, tunEnabled)
-      toast.error(String(e))
+      const applied = await setSysProxyEnabled(nextEnable)
+      await refreshAuthoritativeUi()
+      if (!applied) return
+    } catch (error) {
+      await refreshAuthoritativeUi()
+      toast.error(String(error))
+    } finally {
+      pendingEnableRef.current = null
+      setPendingEnable(null)
     }
   }
 
@@ -108,8 +128,9 @@ const SysproxySwitcher: React.FC<Props> = (props) => {
               />
             </Button>
             <BorderSwitch
-              isShowBorder={match && enable}
-              isSelected={enable ?? false}
+              isShowBorder={match && selected}
+              isSelected={selected}
+              isDisabled={pendingEnable !== null}
               onValueChange={onChange}
             />
           </div>

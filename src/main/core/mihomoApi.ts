@@ -466,6 +466,8 @@ export const mihomoHotReloadConfig = async (): Promise<void> => {
     return
   }
   mihomoApiLogger.info('hot reload config completed')
+  mainWindow?.webContents.send('groupsUpdated')
+  mainWindow?.webContents.send('rulesUpdated')
   try {
     await syncControlDnsAfterApply(dnsGuard)
   } catch (error) {

@@ -20,7 +20,8 @@ export const GroupsProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       errorRetryInterval: 200,
       errorRetryCount: 10,
       refreshInterval: 30000,
-      dedupingInterval: 5000,
+      // 订阅切换事件必须立即读取新内核状态，不能复用切换前 5 秒内的请求
+      dedupingInterval: 0,
       keepPreviousData: true,
       revalidateOnFocus: false
     }

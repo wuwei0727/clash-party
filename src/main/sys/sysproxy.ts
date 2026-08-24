@@ -414,7 +414,8 @@ async function isHelperServiceRegistered(): Promise<boolean> {
 }
 
 function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `\'"'"'`)}'`
+  const escaped = value.replace(/'/g, "'\"'\"'")
+  return `'${escaped}'`
 }
 
 async function startHelperService(forceRepair = false): Promise<void> {

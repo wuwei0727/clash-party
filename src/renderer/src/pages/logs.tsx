@@ -39,7 +39,6 @@ const cachedLogs: {
 }
 
 const onLog = (_e: unknown, ...args: unknown[]): void => {
-const onLog = (_e: unknown, ...args: unknown[]): void => {
   if (cachedLogs.paused) return
   const log = args[0] as IMihomoLogInfo
   log.time = new Date().toLocaleString()

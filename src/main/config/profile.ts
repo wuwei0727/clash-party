@@ -576,9 +576,9 @@ export async function getProfileStr(id: string | undefined): Promise<string> {
 }
 
 export async function setProfileStr(id: string, content: string): Promise<void> {
-  // 读取最新的配置
-  const { current } = await getProfileConfig(true)
   await atomicWriteFile(profilePath(id), content, { encoding: 'utf8' })
+  // 写入完成后再读取 current，避免订阅切换与文件更新交错时漏掉热重载
+  const { current } = await getProfileConfig(true)
   if (current === id) {
     try {
       await mihomoHotReloadConfig()

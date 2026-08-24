@@ -1793,6 +1793,10 @@ async function restartCoreOnce(forceStop: boolean): Promise<void> {
     return startCoreInternal(false, true)
   })
   await startAttempt.readiness
+  // restartCore must wait for the API before asking the renderer to refresh groups and rules.
+  await waitForCoreReady()
+  mainWindow?.webContents.send('groupsUpdated')
+  mainWindow?.webContents.send('rulesUpdated')
 }
 
 function trackCoreRestart(operation: () => Promise<void>): Promise<void> {

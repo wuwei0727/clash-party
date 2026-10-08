@@ -68,33 +68,33 @@ const TunSwitcher: React.FC<Props> = (props) => {
                 return
               } catch (error) {
                 console.error('Failed to restart as admin:', error)
-                  await window.electron.ipcRenderer.invoke(
-                    'showErrorDialog',
-                    t('tun.permissions.failed'),
-                    String(error)
-                  )
-                  setPendingEnable(null)
-                  return
-                }
-              } else {
+                await window.electron.ipcRenderer.invoke(
+                  'showErrorDialog',
+                  t('tun.permissions.failed'),
+                  String(error)
+                )
                 setPendingEnable(null)
                 return
               }
             } else {
+              setPendingEnable(null)
+              return
+            }
+          } else {
             // macOS/Linux下尝试自动获取权限
             try {
               await window.electron.ipcRenderer.invoke('requestTunPermissions')
             } catch (error) {
               console.warn('Permission grant failed:', error)
-                  await window.electron.ipcRenderer.invoke(
-                    'showErrorDialog',
-                    t('tun.permissions.failed'),
-                    String(error)
-                  )
-                  setPendingEnable(null)
-                  return
-                }
-              }
+              await window.electron.ipcRenderer.invoke(
+                'showErrorDialog',
+                t('tun.permissions.failed'),
+                String(error)
+              )
+              setPendingEnable(null)
+              return
+            }
+          }
         }
       } catch (error) {
         console.warn('Permission check failed:', error)
@@ -104,7 +104,7 @@ const TunSwitcher: React.FC<Props> = (props) => {
     try {
       await setTunMode(nextEnable)
       if (nextEnable && appConfig?.silentStart) {
-          await window.electron.ipcRenderer.invoke('enableAutoRun')
+        await window.electron.ipcRenderer.invoke('enableAutoRun')
       }
       window.electron.ipcRenderer.send('updateFloatingWindow')
     } catch (error) {

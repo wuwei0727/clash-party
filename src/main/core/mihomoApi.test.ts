@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => {
   return {
     axiosInstance,
     axiosCreate: vi.fn(() => axiosInstance),
-    generateProfile: vi.fn(async () => 'profile-a'),
+    generateProfile: vi.fn(async () => ({ profileId: 'profile-a' })),
     send: vi.fn(),
     scheduleRuntimeConfigUpload: vi.fn(),
     logger: {
@@ -37,8 +37,13 @@ vi.mock('axios', () => ({
 
 vi.mock('../config', () => ({
   getAppConfig: vi.fn(async () => ({ diffWorkDir: false })),
-  getControledMihomoConfig: vi.fn(async () => ({}))
+  getControledMihomoConfig: vi.fn(async () => ({})),
+  manageSmartOverride: vi.fn(async () => {})
 }))
+
+vi.mock('electron', () => ({ app: { isReady: vi.fn(() => true) } }))
+vi.mock('../traffic/recorder', () => ({ recordTrafficUsage: vi.fn() }))
+vi.mock('./dnsOverrideGuard', () => ({ syncControlDnsAfterApply: vi.fn(async () => {}) }))
 
 vi.mock('../window', () => ({
   mainWindow: {
@@ -60,7 +65,9 @@ vi.mock('./factory', () => ({
   getRuntimeConfig: vi.fn(async () => ({}))
 }))
 vi.mock('./manager', () => ({
-  getMihomoIpcPath: vi.fn(() => '\\\\.\\pipe\\mihomo-test')
+  getMihomoIpcPath: vi.fn(() => '\\\\.\\pipe\\mihomo-test'),
+  hasCoreProcess: vi.fn(() => true),
+  restartCore: vi.fn(async () => {})
 }))
 vi.mock('../resolve/gistApi', () => ({
   scheduleRuntimeConfigUpload: mocks.scheduleRuntimeConfigUpload

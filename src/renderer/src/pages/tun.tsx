@@ -7,7 +7,6 @@ import { useControledMihomoConfig } from '@renderer/hooks/use-controled-mihomo-c
 import {
   grantTunPermissions,
   getWindowsTunDiagnostics,
-  mihomoHotReloadConfig,
   repairWindowsTunEnvironment,
   restartCore,
   setupFirewall

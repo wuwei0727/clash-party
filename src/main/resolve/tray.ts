@@ -1,7 +1,5 @@
-import { execFileSync } from 'child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
-import { tmpdir } from 'os'
-import { extname, join } from 'path'
+import { existsSync } from 'fs'
+import { extname } from 'path'
 import { app, ipcMain, Menu, nativeImage, shell, systemPreferences, Tray } from 'electron'
 import { t } from 'i18next'
 import {

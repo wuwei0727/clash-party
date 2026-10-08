@@ -1,10 +1,6 @@
 import { app, globalShortcut, ipcMain, Notification } from 'electron'
 import { mainWindow, triggerMainWindow } from '../window'
-import {
-  getAppConfig,
-  getControledMihomoConfig,
-  patchControledMihomoConfig
-} from '../config'
+import { getAppConfig, getControledMihomoConfig, patchControledMihomoConfig } from '../config'
 import { setSysProxyEnabled } from '../sys/sysproxy'
 import { quitWithoutCore, setTunMode } from '../core/manager'
 import i18next from '../../shared/i18n'
